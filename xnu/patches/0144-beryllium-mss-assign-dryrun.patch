@@ -1,0 +1,171 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index ca2a156..869a0ce 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -47,6 +47,7 @@ int wl_host_read(const char *part, uint64_t off, void *dst, uint64_t len);
+ #include <machine/atomic.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/device_tree.h>
++#include <vm/pmap.h>
+ #include "sweet_board.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+@@ -2815,7 +2816,7 @@ out_clocks:
+ #define MSS_SCM_RESUME_LIMIT    64u
+ 
+ struct mss_scm_regs {
+-	uint64_t a[7];
++	uint64_t a[9];          /* x0..x8: fn, arginfo, then seven args (assign_mem needs all seven) */
+ };
+ 
+ static void
+@@ -2828,10 +2829,12 @@ mss_smccc(struct mss_scm_regs *r)
+ 	register uint64_t x4 __asm__("x4") = r->a[4];
+ 	register uint64_t x5 __asm__("x5") = r->a[5];
+ 	register uint64_t x6 __asm__("x6") = r->a[6];
++	register uint64_t x7 __asm__("x7") = r->a[7];
++	register uint64_t x8 __asm__("x8") = r->a[8];
+ 	__asm__ volatile ("smc #0"
+-	    : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6)
+-	    : : "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "cc", "memory");
+-	*r = (struct mss_scm_regs) { { x0, x1, x2, x3, x4, x5, x6 } };
++	    : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7), "+r"(x8)
++	    : : "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "cc", "memory");
++	*r = (struct mss_scm_regs) { { x0, x1, x2, x3, x4, x5, x6, x7, x8 } };
+ }
+ 
+ /* Reissue interrupted calls (x0 == 1, x6 keeps the continuation token). */
+@@ -2904,6 +2907,124 @@ wl_mss_preflight(void)
+ 	printf("SWEET MSS: preflight done (QDSP6 0x4080000 / RMB 0x4180000 still not read)\n");
+ }
+ 
++
++/* ---------------------------------------------------------------- stage 5: hyp-assign dry run */
++
++/*
++ * Wi-Fi P3, step 1a. Moves the MBA carve-out between owners and back, with no
++ * write into the region, no RMB register touched and the Q6 left in reset:
++ *
++ *   HLOS(3) -> MSS_MSA(0xF, RW),  then  MSS_MSA -> HLOS(3, RWX)
++ *
++ * The point is to learn whether this phone's QHEE accepts the call at all and
++ * whether HLOS access is restored afterwards (we re-read the first words once
++ * ownership is back). Anything else (copying mba.mbn, RMB_MBA_IMAGE_REG, the
++ * reset release) is a later stage, one change per boot.
++ */
++
++#define MSS_VMID_HLOS     3u
++#define MSS_VMID_MSS_MSA  0xfu
++#define MSS_PERM_READ     0x4u
++#define MSS_PERM_WRITE    0x2u
++#define MSS_PERM_EXEC     0x1u
++#define MSS_PERM_RW       (MSS_PERM_READ | MSS_PERM_WRITE)
++#define MSS_PERM_RWX      (MSS_PERM_RW | MSS_PERM_EXEC)
++
++#define MSS_SVC_MP        0x0c00u
++#define MSS_CMD_ASSIGN    0x16u
++/* QCOM_SCM_ARGS(7, RO, VAL, RO, VAL, RO, VAL, VAL): 7 | (1<<4) | (1<<8) | (1<<12) */
++#define MSS_ARGINFO_ASSIGN  0x1117u
++
++struct mss_perm_info {
++	uint32_t vmid;
++	uint32_t perm;
++	uint64_t ctx;
++	uint32_t ctx_size;
++	uint32_t unused;
++};
++
++/* one page: src list (4 B), mem_to_map (16 B), next-owner list (24 B) */
++static uint8_t mss_assign_buf[4096] __attribute__((aligned(4096)));
++
++static int
++mss_assign(uint32_t src_vmid, uint32_t dst_vmid, uint32_t dst_perm)
++{
++	uint8_t *p = mss_assign_buf;
++	uint32_t *src = (uint32_t *)(void *)p;
++	uint64_t *mtm = (uint64_t *)(void *)(p + 64);
++	struct mss_perm_info *dst = (struct mss_perm_info *)(void *)(p + 128);
++	struct mss_scm_regs init, r;
++	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)mss_assign_buf);
++	uint64_t pa;
++
++	if (!pn) {
++		printf("SWEET MSS: assign buffer has no physical page\n");
++		return -1;
++	}
++	pa = (uint64_t)pn * 4096u;
++
++	src[0] = src_vmid;
++	mtm[0] = MSS_MBA_PA;
++	mtm[1] = MSS_MBA_SIZE;
++	dst->vmid = dst_vmid;
++	dst->perm = dst_perm;
++	dst->ctx = 0;
++	dst->ctx_size = 0;
++	dst->unused = 0;
++	sweet_dma_sync_va(p, sizeof(mss_assign_buf));
++
++	init = (struct mss_scm_regs) { {
++		MSS_SCM_64 | MSS_SCM_SIP | MSS_SVC_MP | MSS_CMD_ASSIGN,
++		MSS_ARGINFO_ASSIGN,
++		pa + 64, 16,             /* mem_to_map: addr/size */
++		pa, 4,                   /* source owners: one vmid */
++		pa + 128, 24,            /* next owners: one {vmid,perm,ctx,ctx_size} */
++		0
++	} };
++	printf("SWEET MSS: assign %u -> %u perm %#x (args pa %#llx)\n", src_vmid, dst_vmid, dst_perm, pa);
++	if (!mss_scm_invoke(&init, &r)) {
++		printf("SWEET MSS: assign did not complete\n");
++		return -1;
++	}
++	printf("SWEET MSS: assign %u -> %u status=%d result=%llu\n", src_vmid, dst_vmid,
++	    (int32_t)r.a[0], r.a[1]);
++	__asm__ volatile ("dsb sy" ::: "memory");
++	return (int32_t)r.a[0];
++}
++
++static void
++wl_mss_assign_test(void)
++{
++	vm_offset_t mba;
++	uint32_t w[4];
++	int fwd, back;
++
++	printf("SWEET MSS: assign dry run: MBA %#x size %#x, no write, no reset\n", MSS_MBA_PA, MSS_MBA_SIZE);
++
++	fwd = mss_assign(MSS_VMID_HLOS, MSS_VMID_MSS_MSA, MSS_PERM_RW);
++	if (fwd != 0) {
++		printf("SWEET MSS: forward assign failed (%d); reverse not attempted\n", fwd);
++		goto out;
++	}
++
++	back = mss_assign(MSS_VMID_MSS_MSA, MSS_VMID_HLOS, MSS_PERM_RWX);
++	printf("SWEET MSS: reverse assign %s (%d)\n", back == 0 ? "ok" : "failed", back);
++
++	mba = ml_io_map(MSS_MBA_PA, MSS_MBA_PAGE);
++	if (mba != 0) {
++		for (unsigned i = 0; i < 4; i++) {
++			w[i] = *(volatile uint32_t *)(mba + 4u * i);
++		}
++		__asm__ volatile ("dmb oshld" ::: "memory");
++		printf("SWEET MSS: MBA after round trip: %08x %08x %08x %08x\n", w[0], w[1], w[2], w[3]);
++	} else {
++		printf("SWEET MSS: MBA re-map failed after round trip\n");
++	}
++
++out:
++	printf("SWEET MSS: assign dry run done (Q6 still in reset, RMB never written)\n");
++}
++
+ /* ---------------------------------------------------------------- thread */
+ 
+ static void
+@@ -2924,6 +3045,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_inventory();
+ 	} else if (wl.stage == 4) {
+ 		wl_mss_preflight();
++	} else if (wl.stage == 5) {
++		wl_mss_assign_test();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
