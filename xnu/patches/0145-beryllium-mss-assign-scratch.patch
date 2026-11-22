@@ -1,0 +1,146 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 736b8e4..338a2b5 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -2845,6 +2845,8 @@ mss_scm_invoke(const struct mss_scm_regs *initial, struct mss_scm_regs *out)
+ {
+ 	*out = *initial;
+ 	for (unsigned resume = 0;; resume++) {
++		uint64_t token = out->a[6];
++
+ 		mss_smccc(out);
+ 		if ((int32_t)out->a[0] != MSS_SCM_INTERRUPTED) {
+ 			return true;
+@@ -2853,6 +2855,9 @@ mss_scm_invoke(const struct mss_scm_regs *initial, struct mss_scm_regs *out)
+ 			printf("SWEET MSS: SCM interrupted call did not complete; stop\n");
+ 			return false;
+ 		}
++		/* Re-issue with the original arguments, carrying only the token. */
++		*out = *initial;
++		out->a[6] = token;
+ 	}
+ }
+ 
+@@ -2949,7 +2954,8 @@ struct mss_perm_info {
+ static uint8_t mss_assign_buf[4096] __attribute__((aligned(4096)));
+ 
+ static int
+-mss_assign(uint32_t src_vmid, uint32_t dst_vmid, uint32_t dst_perm)
++mss_assign(uint64_t mem_pa, uint64_t mem_sz, uint32_t src_vmid, uint32_t dst_vmid,
++    uint32_t dst_perm)
+ {
+ 	uint8_t *p = mss_assign_buf;
+ 	uint32_t *src = (uint32_t *)(void *)p;
+@@ -2966,8 +2972,8 @@ mss_assign(uint32_t src_vmid, uint32_t dst_vmid, uint32_t dst_perm)
+ 	pa = (uint64_t)pn * 4096u;
+ 
+ 	src[0] = src_vmid;
+-	mtm[0] = MSS_MBA_PA;
+-	mtm[1] = MSS_MBA_SIZE;
++	mtm[0] = mem_pa;
++	mtm[1] = mem_sz;
+ 	dst->vmid = dst_vmid;
+ 	dst->perm = dst_perm;
+ 	dst->ctx = 0;
+@@ -2983,7 +2989,11 @@ mss_assign(uint32_t src_vmid, uint32_t dst_vmid, uint32_t dst_perm)
+ 		pa + 128, 24,            /* next owners: one {vmid,perm,ctx,ctx_size} */
+ 		0
+ 	} };
+-	printf("SWEET MSS: assign %u -> %u perm %#x (args pa %#llx)\n", src_vmid, dst_vmid, dst_perm, pa);
++	printf("SWEET MSS: assign %u -> %u perm %#x mem %#llx+%#llx lists %#llx\n",
++	    src_vmid, dst_vmid, dst_perm, mem_pa, mem_sz, pa);
++	printf("SWEET MSS: smc x0=%#llx x1=%#llx x2=%#llx x3=%#llx x4=%#llx x5=%#llx x6=%#llx x7=%#llx x8=%#llx\n",
++	    init.a[0], init.a[1], init.a[2], init.a[3], init.a[4], init.a[5], init.a[6],
++	    init.a[7], init.a[8]);
+ 	if (!mss_scm_invoke(&init, &r)) {
+ 		printf("SWEET MSS: assign did not complete\n");
+ 		return -1;
+@@ -3003,13 +3013,13 @@ wl_mss_assign_test(void)
+ 
+ 	printf("SWEET MSS: assign dry run: MBA %#x size %#x, no write, no reset\n", MSS_MBA_PA, MSS_MBA_SIZE);
+ 
+-	fwd = mss_assign(MSS_VMID_HLOS, MSS_VMID_MSS_MSA, MSS_PERM_RW);
++	fwd = mss_assign(MSS_MBA_PA, MSS_MBA_SIZE, MSS_VMID_HLOS, MSS_VMID_MSS_MSA, MSS_PERM_RW);
+ 	if (fwd != 0) {
+ 		printf("SWEET MSS: forward assign failed (%d); reverse not attempted\n", fwd);
+ 		goto out;
+ 	}
+ 
+-	back = mss_assign(MSS_VMID_MSS_MSA, MSS_VMID_HLOS, MSS_PERM_RWX);
++	back = mss_assign(MSS_MBA_PA, MSS_MBA_SIZE, MSS_VMID_MSS_MSA, MSS_VMID_HLOS, MSS_PERM_RWX);
+ 	printf("SWEET MSS: reverse assign %s (%d)\n", back == 0 ? "ok" : "failed", back);
+ 
+ 	mba = ml_io_map(MSS_MBA_PA, MSS_MBA_PAGE);
+@@ -3027,6 +3037,63 @@ out:
+ 	printf("SWEET MSS: assign dry run done (Q6 still in reset, RMB never written)\n");
+ }
+ 
++
++/* ---------------------------------------------------------------- stage 6: assign a page we own */
++
++/*
++ * Stage 5 (sweetwlan=5) never came back from the ASSIGN SMC when the target
++ * was the MBA carve-out at 0x96900000 with the Q6 still in reset: the call
++ * printed its arguments and then the EL3 side never returned, while the rest
++ * of the kernel booted normally. This stage keeps everything identical except
++ * the region under test: one page of kernel-owned scratch memory, no carve-out,
++ * no XPU owner conflict. It answers "does ASSIGN work at all on this phone",
++ * which decides whether stage 5 hung on the region or on the call itself.
++ *
++ * The page is page-aligned and page-sized, so it is nobody else's memory. If
++ * the reverse call fails, the page stays with MSS_MSA and is never touched
++ * again (no read, no free), so a stale owner cannot fault the kernel later.
++ */
++
++static uint8_t mss_scratch_page[4096] __attribute__((aligned(4096)));
++
++static void
++wl_mss_assign_scratch(void)
++{
++	volatile uint32_t *w = (volatile uint32_t *)(void *)mss_scratch_page;
++	ppnum_t pn;
++	uint64_t pa;
++	int fwd, back;
++
++	printf("SWEET MSS: stage 6 scratch-page assign test (no carve-out)\n");
++	pn = pmap_find_phys(kernel_pmap, (addr64_t)mss_scratch_page);
++	if (!pn) {
++		printf("SWEET MSS: scratch page has no physical page\n");
++		return;
++	}
++	pa = (uint64_t)pn * 4096u;
++
++	*w = 0x5a5a5a5au;
++	__asm__ volatile ("dmb sy" ::: "memory");
++	printf("SWEET MSS: scratch va %#llx pa %#llx readable, word0 %08x\n",
++	    (unsigned long long)(uintptr_t)mss_scratch_page, pa, *w);
++
++	fwd = mss_assign(pa, PAGE_SIZE, MSS_VMID_HLOS, MSS_VMID_MSS_MSA, MSS_PERM_RW);
++	if (fwd != 0) {
++		printf("SWEET MSS: scratch forward assign failed (%d); reverse not attempted\n", fwd);
++		return;
++	}
++
++	back = mss_assign(pa, PAGE_SIZE, MSS_VMID_MSS_MSA, MSS_VMID_HLOS, MSS_PERM_RWX);
++	if (back != 0) {
++		printf("SWEET MSS: scratch reverse assign failed (%d); page left with MSS, never touched\n", back);
++		return;
++	}
++
++	__asm__ volatile ("dsb sy" ::: "memory");
++	printf("SWEET MSS: scratch readable after round trip: %08x\n", *w);
++	printf("SWEET MSS: stage 6 done (TZ ASSIGN works; stage 5 hang is region-specific)\n");
++}
++
+ /* ---------------------------------------------------------------- thread */
+ 
+ static void
+@@ -3049,6 +3116,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_mss_preflight();
+ 	} else if (wl.stage == 5) {
+ 		wl_mss_assign_test();
++	} else if (wl.stage == 6) {
++		wl_mss_assign_scratch();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
