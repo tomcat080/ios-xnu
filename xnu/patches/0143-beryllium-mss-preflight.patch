@@ -1,0 +1,144 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index fb25b57..ca2a156 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -2780,6 +2780,130 @@ out_clocks:
+ 	printf("SWEET WLAN: bluetooth stage done\n");
+ }
+ 
++
++/* ---------------------------------------------------------------- stage 4: MSS preflight (read-only) */
++
++/*
++ * Wi-Fi P3, step 0 (docs/06-WiFi-P3-开工清单.md). Answers the two questions
++ * the plan leaves open before the first hypervisor-mediated action:
++ *
++ *   1. does this phone's TZ expose SCM ASSIGN_MEM (SIP svc 0x0C cmd 0x16)?
++ *      -- asked through INFO_IS_CALL_AVAILABLE, the only SMC issued here;
++ *   2. are the MBA carve-out and the TCSR halt registers readable while the
++ *      modem is still in reset?
++ *
++ * Nothing is written: no hyp-assign, no reset release, no QDSP6/RMB read.
++ * A read that hangs the bus is the documented risk of this step; that is why
++ * it runs as its own boot-arg stage and logs one line at a time.
++ */
++
++#define MSS_MBA_PA          0x96900000u
++#define MSS_MBA_PAGE        0x00001000u
++#define MSS_TCSR_PA         0x01f60000u
++#define MSS_TCSR_SIZE       0x00010000u
++#define MSS_TCSR_HALT_Q6    0x3000u         /* halt_q6   0x1f63000 */
++#define MSS_TCSR_HALT_MODEM 0x5000u         /* halt_modem 0x1f65000 */
++#define MSS_TCSR_HALT_NC    0x4000u         /* halt_nc   0x1f64000 */
++
++#define MSS_SCM_SIP             0x02000000u
++#define MSS_SCM_64              0x40000000u
++#define MSS_SCM_SVC_ASSIGN_MEM  0x0c00u
++#define MSS_SCM_CMD_ASSIGN_MEM  0x16u
++#define MSS_SCM_SVC_INFO        0x0600u
++#define MSS_SCM_CMD_INFO_AVAIL  0x01u
++#define MSS_SCM_INTERRUPTED     1
++#define MSS_SCM_RESUME_LIMIT    64u
++
++struct mss_scm_regs {
++	uint64_t a[7];
++};
++
++static void
++mss_smccc(struct mss_scm_regs *r)
++{
++	register uint64_t x0 __asm__("x0") = r->a[0];
++	register uint64_t x1 __asm__("x1") = r->a[1];
++	register uint64_t x2 __asm__("x2") = r->a[2];
++	register uint64_t x3 __asm__("x3") = r->a[3];
++	register uint64_t x4 __asm__("x4") = r->a[4];
++	register uint64_t x5 __asm__("x5") = r->a[5];
++	register uint64_t x6 __asm__("x6") = r->a[6];
++	__asm__ volatile ("smc #0"
++	    : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6)
++	    : : "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "cc", "memory");
++	*r = (struct mss_scm_regs) { { x0, x1, x2, x3, x4, x5, x6 } };
++}
++
++/* Reissue interrupted calls (x0 == 1, x6 keeps the continuation token). */
++static bool
++mss_scm_invoke(const struct mss_scm_regs *initial, struct mss_scm_regs *out)
++{
++	*out = *initial;
++	for (unsigned resume = 0;; resume++) {
++		mss_smccc(out);
++		if ((int32_t)out->a[0] != MSS_SCM_INTERRUPTED) {
++			return true;
++		}
++		if (resume == MSS_SCM_RESUME_LIMIT) {
++			printf("SWEET MSS: SCM interrupted call did not complete; stop\n");
++			return false;
++		}
++	}
++}
++
++static void
++wl_mss_preflight(void)
++{
++	struct mss_scm_regs init, r;
++	vm_offset_t mba = 0, tcsr = 0;
++	uint32_t w[4];
++
++	printf("SWEET MSS: preflight start (read-only): no hyp-assign, no reset release\n");
++
++	/* 1. SCM: is ASSIGN_MEM implemented on this phone's TZ? */
++	init = (struct mss_scm_regs) { {
++		MSS_SCM_64 | MSS_SCM_SIP | MSS_SCM_SVC_INFO | MSS_SCM_CMD_INFO_AVAIL,
++		1,
++		MSS_SCM_SIP | MSS_SCM_SVC_ASSIGN_MEM | MSS_SCM_CMD_ASSIGN_MEM,
++		0, 0, 0, 0
++	} };
++	printf("SWEET MSS: SCM query fn=%#llx arg1=%#llx\n", init.a[0], init.a[2]);
++	if (mss_scm_invoke(&init, &r)) {
++		printf("SWEET MSS: SCM ASSIGN_MEM svc 0x0C cmd 0x16 available: status=%d result=%llu\n",
++		    (int32_t)r.a[0], r.a[1]);
++	} else {
++		printf("SWEET MSS: SCM query did not complete\n");
++	}
++
++	/* 2. MBA carve-out: first 4 words only, no write. */
++	mba = ml_io_map(MSS_MBA_PA, MSS_MBA_PAGE);
++	if (mba == 0) {
++		printf("SWEET MSS: MBA carve-out 0x%08x mapping failed\n", MSS_MBA_PA);
++	} else {
++		for (unsigned i = 0; i < 4; i++) {
++			w[i] = *(volatile uint32_t *)(mba + 4u * i);
++		}
++		__asm__ volatile ("dmb oshld" ::: "memory");
++		printf("SWEET MSS: MBA 0x%08x +0: %08x %08x %08x %08x (%s)\n", MSS_MBA_PA,
++		    w[0], w[1], w[2], w[3],
++		    (w[0] == 0xffffffffu && w[1] == 0xffffffffu) ? "unmapped/fault" :
++		    ((w[0] == 0 && w[1] == 0 && w[2] == 0 && w[3] == 0) ? "zero (not loaded)" : "non-zero"));
++	}
++
++	/* 3. TCSR halt registers (read-only; Linux programs these, we only look). */
++	tcsr = ml_io_map(MSS_TCSR_PA, MSS_TCSR_SIZE);
++	if (tcsr == 0) {
++		printf("SWEET MSS: TCSR 0x%08x mapping failed\n", MSS_TCSR_PA);
++	} else {
++		printf("SWEET MSS: TCSR halt_q6 %#08x halt_modem %#08x halt_nc %#08x\n",
++		    wl_rd(tcsr, MSS_TCSR_HALT_Q6),
++		    wl_rd(tcsr, MSS_TCSR_HALT_MODEM),
++		    wl_rd(tcsr, MSS_TCSR_HALT_NC));
++	}
++
++	printf("SWEET MSS: preflight done (QDSP6 0x4080000 / RMB 0x4180000 still not read)\n");
++}
++
+ /* ---------------------------------------------------------------- thread */
+ 
+ static void
+@@ -2798,6 +2922,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_bt();
+ 	} else if (wl.stage == 3) {
+ 		wl_inventory();
++	} else if (wl.stage == 4) {
++		wl_mss_preflight();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
