@@ -1,8 +1,8 @@
 diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
-index ca2a156..869a0ce 100644
+index ca2a156..736b8e4 100644
 --- a/bsd/dev/beryllium_wlan.c
 +++ b/bsd/dev/beryllium_wlan.c
-@@ -47,6 +47,7 @@ int wl_host_read(const char *part, uint64_t off, void *dst, uint64_t len);
+@@ -47,9 +47,11 @@ int wl_host_read(const char *part, uint64_t off, void *dst, uint64_t len);
  #include <machine/atomic.h>
  #include <pexpert/pexpert.h>
  #include <pexpert/device_tree.h>
@@ -10,7 +10,19 @@ index ca2a156..869a0ce 100644
  #include "sweet_board.h"
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
-@@ -2815,7 +2816,7 @@ out_clocks:
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern kern_return_t thread_terminate(thread_t);
+ extern int sweet_ufs_read_part(const char *name, uint64_t off, void *dst, uint64_t len);
+ extern int sweet_ufs_part_size(const char *name, uint8_t *lun, uint64_t *bytes);
+@@ -2798,6 +2800,7 @@ out_clocks:
+  */
+ 
+ #define MSS_MBA_PA          0x96900000u
++#define MSS_MBA_SIZE        0x00200000u
+ #define MSS_MBA_PAGE        0x00001000u
+ #define MSS_TCSR_PA         0x01f60000u
+ #define MSS_TCSR_SIZE       0x00010000u
+@@ -2815,7 +2818,7 @@ out_clocks:
  #define MSS_SCM_RESUME_LIMIT    64u
  
  struct mss_scm_regs {
@@ -19,7 +31,7 @@ index ca2a156..869a0ce 100644
  };
  
  static void
-@@ -2828,10 +2829,12 @@ mss_smccc(struct mss_scm_regs *r)
+@@ -2828,10 +2831,12 @@ mss_smccc(struct mss_scm_regs *r)
  	register uint64_t x4 __asm__("x4") = r->a[4];
  	register uint64_t x5 __asm__("x5") = r->a[5];
  	register uint64_t x6 __asm__("x6") = r->a[6];
@@ -35,7 +47,7 @@ index ca2a156..869a0ce 100644
  }
  
  /* Reissue interrupted calls (x0 == 1, x6 keeps the continuation token). */
-@@ -2904,6 +2907,124 @@ wl_mss_preflight(void)
+@@ -2904,6 +2909,124 @@ wl_mss_preflight(void)
  	printf("SWEET MSS: preflight done (QDSP6 0x4080000 / RMB 0x4180000 still not read)\n");
  }
  
@@ -160,7 +172,7 @@ index ca2a156..869a0ce 100644
  /* ---------------------------------------------------------------- thread */
  
  static void
-@@ -2924,6 +3045,8 @@ wl_thread(void *arg, wait_result_t wr)
+@@ -2924,6 +3047,8 @@ wl_thread(void *arg, wait_result_t wr)
  		wl_inventory();
  	} else if (wl.stage == 4) {
  		wl_mss_preflight();
