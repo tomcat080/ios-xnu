@@ -1,0 +1,68 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index f0be823..4ed1a52 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3399,6 +3399,54 @@ wl_audio_stage15(void)
+ 	printf("SWEET AUDIO: all INIT probes rejected\n");
+ }
+ 
++/* ---------------------------------------------------------------- stage 16: PAS INIT call-format probe */
++
++static int
++aud_pas_try(uint64_t flags64, uint32_t arginfo, uint64_t a2, uint64_t a3, const char *tag)
++{
++	struct mss_scm_regs init, r;
++
++	init = (struct mss_scm_regs) { {
++		flags64 | MSS_SCM_SIP | AUD_SVC_PIL | AUD_CMD_PAS_INIT,
++		arginfo, AUD_PAS_ID, a2, a3, 0, 0, 0
++	} };
++	if (!mss_scm_invoke(&init, &r)) {
++		printf("SWEET AUDIO: %s did not complete\n", tag);
++		return -1;
++	}
++	printf("SWEET AUDIO: %s x0=%#llx arginfo %#x pa %#llx len %#llx -> status %d result %llu\n",
++	    tag, init.a[0], arginfo, a2, a3, (int32_t)r.a[0], r.a[1]);
++	return (int32_t)r.a[0];
++}
++
++static void
++wl_audio_stage16(void)
++{
++	static struct wl_fat fat;
++	uint32_t len;
++
++	printf("SWEET AUDIO: stage 16 start: INIT call-format probe (smc32 vs smc64, page-rounded len)\n");
++	if (fat_mount(&fat, "modem")) {
++		printf("SWEET AUDIO: modem FAT mount failed\n");
++		return;
++	}
++	len = aud_meta_build(&fat);
++	if (!len) {
++		printf("SWEET AUDIO: metadata build failed\n");
++		return;
++	}
++	/* A: SMC32 (no 0x40000000), 3 args VAL/RO/VAL, exact length */
++	aud_pas_try(0, 0x43, aud_meta_pa, len, "A smc32 0x43 exact");
++	/* B: SMC32, 3 args VAL/RW/VAL, exact length */
++	aud_pas_try(0, 0x83, aud_meta_pa, len, "B smc32 0x83 exact");
++	/* C: SMC32, page-rounded length */
++	aud_pas_try(0, 0x43, aud_meta_pa, AUD_META_SIZE, "C smc32 0x43 rounded");
++	aud_pas_try(0, 0x83, aud_meta_pa, AUD_META_SIZE, "D smc32 0x83 rounded");
++	/* E: SMC64 with page-rounded length */
++	aud_pas_try(MSS_SCM_64, 0x83, aud_meta_pa, AUD_META_SIZE, "E smc64 0x83 rounded");
++	printf("SWEET AUDIO: stage 16 done\n");
++}
++
+ /* ---------------------------------------------------------------- stage 13: ADSP segment load */
+ 
+ static uint32_t
+@@ -3971,6 +4019,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_audio_stage14();
+ 	} else if (wl.stage == 15) {
+ 		wl_audio_stage15();
++	} else if (wl.stage == 16) {
++		wl_audio_stage16();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
