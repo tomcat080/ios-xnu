@@ -1,0 +1,100 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 3f5e483..59659fa 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3237,6 +3237,86 @@ wl_dsp_part_scan(void)
+ 	}
+ }
+ 
++/* ---------------------------------------------------------------- stage 11: modem FAT listing */
++
++static void
++fat_list_dir(const struct wl_fat *f, const char *path, uint32_t max_names)
++{
++	uint32_t cl = 0, nent = 0, shown = 0, dsp = 0;
++	int err;
++
++	if (*path) {
++		uint32_t size = 0;
++		err = fat_open(f, path, &cl, &size);
++		if (err) {
++			printf("SWEET AUDIO: fat:%s open failed %d\n", path, err);
++			return;
++		}
++	}
++	err = fat_dir_load(f, cl, &nent);
++	if (err) {
++		printf("SWEET AUDIO: fat:%s dir load failed %d\n", path, err);
++		return;
++	}
++	printf("SWEET AUDIO: fat:%s entries %u\n", *path ? path : "/", nent);
++	for (uint32_t i = 0; i < nent && shown < max_names; i++) {
++		const uint8_t *e = wl_dirbuf + (uint64_t)i * 32;
++		char name[13];
++		unsigned n = 0;
++
++		if (e[0] == 0) {
++			break;
++		}
++		if (e[0] == 0xe5 || (e[11] & 0x0f) == 0x0f || (e[11] & 0x08)) {
++			continue;
++		}
++		for (unsigned j = 0; j < 8 && e[j] != ' '; j++) {
++			name[n++] = (char)e[j];
++		}
++		if (e[8] != ' ') {
++			name[n++] = '.';
++			for (unsigned j = 8; j < 11 && e[j] != ' '; j++) {
++				name[n++] = (char)e[j];
++			}
++		}
++		name[n] = 0;
++		printf("SWEET AUDIO: fat:%s%s%s size %u attr %#x\n", *path ? path : "", *path ? "/" : "",
++		    name, le32(e + 28), e[11]);
++		shown++;
++		if ((e[0] == 'A' || e[0] == 'a') && (e[1] == 'D' || e[1] == 'd') &&
++		    (e[2] == 'S' || e[2] == 's') && (e[3] == 'P' || e[3] == 'p')) {
++			dsp++;
++		}
++	}
++	printf("SWEET AUDIO: fat:%s scanned %u entries, adsp* %u\n", *path ? path : "/", shown, dsp);
++}
++
++static void
++wl_audio_stage11(void)
++{
++	static struct wl_fat fat;
++	int err;
++
++	printf("SWEET AUDIO: stage 11 start: modem/bluetooth FAT listing (read-only)\n");
++	err = fat_mount(&fat, "modem");
++	if (err) {
++		printf("SWEET AUDIO: modem FAT mount failed %d\n", err);
++	} else {
++		printf("SWEET AUDIO: modem FAT bps %u spc %u ncl %u fatsz %u rootent %u\n",
++		    fat.bps, fat.spc, fat.ncl, fat.fatsz, fat.rootent);
++		fat_list_dir(&fat, "", 40);
++		fat_list_dir(&fat, "image", 60);
++	}
++	err = fat_mount(&fat, "bluetooth");
++	if (err) {
++		printf("SWEET AUDIO: bluetooth FAT mount failed %d\n", err);
++	} else {
++		fat_list_dir(&fat, "", 20);
++		fat_list_dir(&fat, "image", 40);
++	}
++	printf("SWEET AUDIO: stage 11 done\n");
++}
++
+ /* ---------------------------------------------------------------- stage 10: dsp ext4 listing */
+ 
+ static struct {
+@@ -3522,6 +3602,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_audio_stage9();
+ 	} else if (wl.stage == 10) {
+ 		wl_audio_stage10();
++	} else if (wl.stage == 11) {
++		wl_audio_stage11();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
