@@ -1,0 +1,113 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 195bf33..0aa1969 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3183,6 +3183,99 @@ wl_audio_preflight(void)
+ }
+ 
+ 
++/* ---------------------------------------------------------------- stage 8: audio B1a */
++
++static void
++wl_dsp_part_scan(void)
++{
++	static struct wl_fat fat;
++	uint32_t cnt = 0, cl = 0, size = 0;
++	uint8_t head[32];
++	uint64_t bytes = 0;
++	uint8_t lun = 0;
++	int err;
++
++	err = sweet_ufs_part_size("dsp", &lun, &bytes);
++	if (err) {
++		printf("SWEET AUDIO: dsp partition: not found (%d)\n", err);
++		return;
++	}
++	printf("SWEET AUDIO: dsp partition: LUN %u, %llu KiB (%#llx bytes)\n", lun,
++	    bytes >> 10, (unsigned long long)bytes);
++	memset(head, 0, sizeof(head));
++	err = sweet_ufs_read_part("dsp", 0, head, sizeof(head));
++	if (err) {
++		printf("SWEET AUDIO: dsp +0 read failed (%d)\n", err);
++	} else {
++		printf("SWEET AUDIO: dsp +0:");
++		for (unsigned i = 0; i < sizeof(head); i++) {
++			printf(" %02x", head[i]);
++		}
++		printf(" (%s)\n", (head[0] == 0x7f && head[1] == 'E' && head[2] == 'L' && head[3] == 'F') ?
++		    "ELF header at +0" : "not an ELF at +0 (check FAT below)");
++	}
++
++	err = fat_mount(&fat, "dsp");
++	if (err) {
++		printf("SWEET AUDIO: dsp FAT16 mount: %d (not a FAT16 volume)\n", err);
++		return;
++	}
++	printf("SWEET AUDIO: dsp FAT16 mount: 0 (bytes/sector %u, sectors/cluster %u, clusters %u)\n",
++	    fat.bps, fat.spc, fat.ncl);
++	if (!fat_open(&fat, "image/adsp.mbn", &cl, &size)) {
++		printf("SWEET AUDIO: dsp:image/adsp.mbn cluster %u size %u\n", cl, size);
++	} else {
++		printf("SWEET AUDIO: dsp:image/adsp.mbn absent\n");
++	}
++	if (!fat_open(&fat, "adsp.mbn", &cl, &size)) {
++		printf("SWEET AUDIO: dsp:adsp.mbn cluster %u size %u\n", cl, size);
++	} else {
++		printf("SWEET AUDIO: dsp:adsp.mbn absent\n");
++	}
++	if (!fat_count_prefix(&fat, "image", "adsp", &cnt)) {
++		printf("SWEET AUDIO: dsp:image/adsp* %u files\n", cnt);
++	}
++}
++
++static void
++wl_audio_stage8(void)
++{
++	vm_offset_t gcc = 0, adsp = 0;
++	uint32_t q6, sway, ad;
++
++	printf("SWEET AUDIO: stage 8 start: dsp partition scan + LPASS CBCR enable probe (no PAS, no reset)\n");
++	wl_dsp_part_scan();
++
++	gcc = ml_io_map(AUD_GCC_PA, AUD_GCC_SIZE);
++	if (gcc == 0) {
++		printf("SWEET AUDIO: GCC window failed to map\n");
++		return;
++	}
++	q6 = wl_rd(gcc, AUD_LPASS_Q6_AXI);
++	sway = wl_rd(gcc, AUD_LPASS_SWAY);
++	printf("SWEET AUDIO: before: q6_axi %#x (CLK_OFF %u), sway %#x (CLK_OFF %u)\n",
++	    q6, (q6 >> 31) & 1u, sway, (sway >> 31) & 1u);
++	if ((q6 & 1u) == 0) {
++		wl_wr(gcc, AUD_LPASS_Q6_AXI, q6 | 1u);
++	}
++	if ((sway & 1u) == 0) {
++		wl_wr(gcc, AUD_LPASS_SWAY, sway | 1u);
++	}
++	delay(200);
++	q6 = wl_rd(gcc, AUD_LPASS_Q6_AXI);
++	sway = wl_rd(gcc, AUD_LPASS_SWAY);
++	printf("SWEET AUDIO: after: q6_axi %#x (CLK_OFF %u, ON %u), sway %#x (CLK_OFF %u, ON %u)\n",
++	    q6, (q6 >> 31) & 1u, q6 & 1u, sway, (sway >> 31) & 1u, sway & 1u);
++	printf("SWEET AUDIO: clocks left enabled for the next gate\n");
++
++	adsp = ml_io_map(AUD_ADSP_PA, AUD_ADSP_PAGE);
++	if (adsp != 0) {
++		ad = wl_rd(adsp, 0);
++		printf("SWEET AUDIO: ADSP 0x%08x +0 still %#x after CBCR write\n", AUD_ADSP_PA, ad);
++	}
++	printf("SWEET AUDIO: stage 8 done\n");
++}
++
+ /* ---------------------------------------------------------------- thread */
+ 
+ static void
+@@ -3209,6 +3302,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_mss_assign_scratch();
+ 	} else if (wl.stage == 7) {
+ 		wl_audio_preflight();
++	} else if (wl.stage == 8) {
++		wl_audio_stage8();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
