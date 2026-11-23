@@ -1,0 +1,109 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 338a2b5..195bf33 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3094,6 +3094,95 @@ wl_mss_assign_scratch(void)
+ 	printf("SWEET MSS: stage 6 done (TZ ASSIGN works; stage 5 hang is region-specific)\n");
+ }
+ 
++
++/* ---------------------------------------------------------------- stage 7: audio / ADSP preflight */
++
++/*
++ * Audio line, gate B0 (docs/08-音频线开工清单.md). Read-only, nothing is
++ * written and nothing is brought out of reset:
++ *
++ *   1. does this TZ expose the PAS calls audio needs (svc 0x02 cmd 0x01/0x02/0x05)?
++ *   2. what do the GCC LPASS clock branches say (0x47000 q6_axi, 0x47008 sway)?
++ *   3. is the ADSP carve-out at 0x8c500000 readable and empty, or already loaded?
++ *   4. do the "adsp" partitions exist, and how big is the firmware?
++ *
++ * Playback on this phone is Q6ADSP -> SLIMBUS_0_RX -> WCD9340, so ADSP is the
++ * gate: if PAS_INIT_IMAGE / AUTH_AND_RESET are unavailable here, route B has no
++ * path and only the software-only route A remains.
++ */
++
++#define AUD_GCC_PA         0x00100000u
++#define AUD_GCC_SIZE       0x00050000u      /* covers 0x47000 / 0x47008 */
++#define AUD_LPASS_Q6_AXI   0x47000u
++#define AUD_LPASS_SWAY     0x47008u
++#define AUD_ADSP_PA        0x8c500000u
++#define AUD_ADSP_PAGE      0x00001000u
++#define AUD_SVC_PIL        0x0200u
++#define AUD_CMD_PAS_INIT   0x01u
++#define AUD_CMD_PAS_SETUP  0x02u
++#define AUD_CMD_PAS_AUTH   0x05u
++
++static void
++wl_pas_query(uint32_t cmd, const char *name)
++{
++	struct mss_scm_regs init, r;
++
++	init = (struct mss_scm_regs) { {
++		MSS_SCM_64 | MSS_SCM_SIP | MSS_SCM_SVC_INFO | MSS_SCM_CMD_INFO_AVAIL,
++		1,
++		MSS_SCM_SIP | AUD_SVC_PIL | cmd,
++		0, 0, 0, 0
++	} };
++	if (mss_scm_invoke(&init, &r)) {
++		printf("SWEET AUDIO: PAS %s (svc 0x02 cmd %#x): status=%d result=%llu\n",
++		    name, cmd, (int32_t)r.a[0], r.a[1]);
++	} else {
++		printf("SWEET AUDIO: PAS %s query did not complete\n", name);
++	}
++}
++
++static void
++wl_audio_preflight(void)
++{
++	vm_offset_t gcc = 0, adsp = 0;
++	uint32_t w[4];
++
++	printf("SWEET AUDIO: preflight start (read-only): no PAS call, no reset, no write\n");
++
++	wl_pas_query(AUD_CMD_PAS_INIT, "PAS_INIT_IMAGE");
++	wl_pas_query(AUD_CMD_PAS_SETUP, "PAS_MEM_SETUP");
++	wl_pas_query(AUD_CMD_PAS_AUTH, "PAS_AUTH_AND_RESET");
++
++	gcc = ml_io_map(AUD_GCC_PA, AUD_GCC_SIZE);
++	if (gcc == 0) {
++		printf("SWEET AUDIO: GCC window failed to map\n");
++	} else {
++		printf("SWEET AUDIO: GCC lpass q6_axi CBCR %#x = %#x, sway CBCR %#x = %#x\n",
++		    AUD_LPASS_Q6_AXI, wl_rd(gcc, AUD_LPASS_Q6_AXI),
++		    AUD_LPASS_SWAY, wl_rd(gcc, AUD_LPASS_SWAY));
++	}
++
++	adsp = ml_io_map(AUD_ADSP_PA, AUD_ADSP_PAGE);
++	if (adsp == 0) {
++		printf("SWEET AUDIO: ADSP carve-out 0x%08x mapping failed\n", AUD_ADSP_PA);
++	} else {
++		for (unsigned i = 0; i < 4; i++) {
++			w[i] = wl_rd(adsp, 4u * i);
++		}
++		printf("SWEET AUDIO: ADSP 0x%08x +0: %08x %08x %08x %08x (%s)\n", AUD_ADSP_PA,
++		    w[0], w[1], w[2], w[3],
++		    (w[0] == 0 && w[1] == 0 && w[2] == 0 && w[3] == 0) ?
++		    "zero (firmware not loaded)" : "non-zero");
++	}
++
++	wl_part_info("adsp");
++	wl_part_info("adsp_a");
++	wl_part_info("adsp_b");
++
++	printf("SWEET AUDIO: preflight done\n");
++}
++
++
+ /* ---------------------------------------------------------------- thread */
+ 
+ static void
+@@ -3118,6 +3207,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_mss_assign_test();
+ 	} else if (wl.stage == 6) {
+ 		wl_mss_assign_scratch();
++	} else if (wl.stage == 7) {
++		wl_audio_preflight();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
