@@ -1,0 +1,132 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 66bdb1a..9f8afbc 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3237,6 +3237,118 @@ wl_dsp_part_scan(void)
+ 	}
+ }
+ 
++/* ---------------------------------------------------------------- stage 13: ADSP segment load */
++
++static uint32_t
++adsp_mdt_load(struct wl_fat *fat, bool write_segments)
++{
++	static uint8_t mdt[8192];
++ struct elf32_ehdr eh;
++	uint32_t cl = 0, size = 0, nload = 0, nhash = 0;
++	uint64_t total = 0;
++	int err;
++
++	err = fat_open(fat, "image/adsp.mdt", &cl, &size);
++	if (err || size > sizeof(mdt)) {
++		printf("SWEET AUDIO: adsp.mdt open/read failed %d size %u\n", err, size);
++		return 0;
++	}
++	err = fat_read_chain(fat, cl, 0, mdt, size);
++	if (err) {
++		printf("SWEET AUDIO: adsp.mdt chain read failed %d\n", err);
++		return 0;
++	}
++	memcpy(&eh, mdt, sizeof(eh));
++	printf("SWEET AUDIO: loading %u phdrs (%s)\n", eh.e_phnum,
++	    write_segments ? "WRITING segments into carve-out" : "dry run");
++	for (uint32_t i = 0; i < eh.e_phnum; i++) {
++		struct elf32_phdr ph;
++		char name[16];
++		uint32_t fcl = 0, fsz = 0, map_sz;
++		vm_offset_t map;
++		bool hash;
++
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		hash = (ph.p_flags & MDT_TYPE_MASK) == MDT_TYPE_HASH;
++		if (ph.p_filesz == 0) {
++			if (ph.p_memsz && ph.p_type == 1) {
++				printf("SWEET AUDIO: ph%02u bss %#x bytes at %#x (no file)\n", i,
++				    ph.p_memsz, ph.p_paddr);
++			}
++			continue;
++		}
++		name[0] = 'i';
++		/* "image/adsp.bNN" */
++		memcpy(name, "image/adsp.b", 12);
++		name[12] = (char)('0' + (i / 10) % 10);
++		name[13] = (char)('0' + i % 10);
++		name[14] = 0;
++		err = fat_open(fat, name, &fcl, &fsz);
++		if (err) {
++			printf("SWEET AUDIO: %s not found (%d)\n", name, err);
++			continue;
++		}
++		if (fsz != ph.p_filesz) {
++			printf("SWEET AUDIO: %s size %u != filesz %#x\n", name, fsz, ph.p_filesz);
++		}
++		if (hash) {
++			printf("SWEET AUDIO: ph%02u hash %u bytes at %#x (metadata, not loaded)\n",
++			    i, fsz, ph.p_paddr);
++			nhash++;
++			continue;
++		}
++		if (!write_segments) {
++			printf("SWEET AUDIO: ph%02u would load %u bytes -> %#x\n", i, fsz, ph.p_paddr);
++			continue;
++		}
++		map_sz = (uint32_t)((ph.p_memsz + 0xfff) & ~0xfffu);
++		map = ml_io_map(ph.p_paddr, map_sz);
++		if (map == 0) {
++			printf("SWEET AUDIO: ph%02u map %#x+%#x failed\n", i, ph.p_paddr, map_sz);
++			continue;
++		}
++		err = fat_read_chain(fat, fcl, 0, (void *)map, fsz);
++		if (err) {
++			printf("SWEET AUDIO: ph%02u read %s failed %d\n", i, name, err);
++			continue;
++		}
++		if (ph.p_memsz > ph.p_filesz) {
++			memset((void *)(map + fsz), 0, ph.p_memsz - ph.p_filesz);
++		}
++		total += fsz;
++		nload++;
++		printf("SWEET AUDIO: ph%02u loaded %u bytes -> %#x (+bss %#x)\n", i, fsz, ph.p_paddr,
++		    ph.p_memsz - ph.p_filesz);
++	}
++	printf("SWEET AUDIO: segments loaded %u, hash %u, bytes %llu\n", nload, nhash,
++	    (unsigned long long)total);
++	return nload;
++}
++
++static void
++wl_audio_stage13(void)
++{
++	static struct wl_fat fat;
++	vm_offset_t probe;
++	uint32_t v;
++
++	printf("SWEET AUDIO: stage 13 start: ADSP segment load into carve-out (no PAS yet)\n");
++	if (fat_mount(&fat, "modem")) {
++		printf("SWEET AUDIO: modem FAT mount failed\n");
++		return;
++	}
++	if (adsp_mdt_load(&fat, true) == 0) {
++		printf("SWEET AUDIO: nothing loaded\n");
++		return;
++	}
++	probe = ml_io_map(AUD_ADSP_PA, 0x1000);
++	if (probe) {
++		v = wl_rd(probe, 0);
++		printf("SWEET AUDIO: carve-out %#x +0 now %#x (was 0)\n", AUD_ADSP_PA, v);
++	}
++	printf("SWEET AUDIO: stage 13 done\n");
++}
++
+ /* ---------------------------------------------------------------- stage 12: ADSP.MDT headers */
+ 
+ static void
+@@ -3673,6 +3785,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_audio_stage11();
+ 	} else if (wl.stage == 12) {
+ 		wl_audio_stage12();
++	} else if (wl.stage == 13) {
++		wl_audio_stage13();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
