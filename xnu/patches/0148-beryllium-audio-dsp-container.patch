@@ -1,0 +1,91 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 69601c5..9a54026 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3237,6 +3237,77 @@ wl_dsp_part_scan(void)
+ 	}
+ }
+ 
++/* ---------------------------------------------------------------- stage 9: dsp container hunt */
++
++static void
++wl_audio_stage9(void)
++{
++	static const uint64_t offs[] = {
++		0x0, 0x200, 0x400, 0x600, 0x800, 0x1000, 0x2000, 0x4000, 0x8000,
++		0x10000, 0x20000, 0x40000, 0x80000, 0x100000
++	};
++	uint8_t buf[64];
++	uint8_t sec[16];
++	uint64_t bytes = 0;
++	uint8_t lun = 0;
++	int err;
++
++	printf("SWEET AUDIO: stage 9 start: dsp container hunt (read-only)\n");
++	err = sweet_ufs_part_size("dsp", &lun, &bytes);
++	if (err) {
++		printf("SWEET AUDIO: dsp not found (%d)\n", err);
++		return;
++	}
++	printf("SWEET AUDIO: dsp LUN %u, %#llx bytes\n", lun, (unsigned long long)bytes);
++
++	for (unsigned i = 0; i < sizeof(offs) / sizeof(offs[0]); i++) {
++		memset(buf, 0, sizeof(buf));
++		err = sweet_ufs_read_part("dsp", offs[i], buf, 32);
++		printf("SWEET AUDIO: dsp +%#08llx err %d:", (unsigned long long)offs[i], err);
++		for (unsigned j = 0; j < 16; j++) {
++			printf(" %02x", buf[j]);
++		}
++		printf("\n");
++	}
++
++	/* ext4 superblock: magic 0x53EF sits at 1024 + 0x38 */
++	memset(buf, 0, sizeof(buf));
++	if (!sweet_ufs_read_part("dsp", 1024, buf, 64)) {
++		printf("SWEET AUDIO: ext4? magic at 1024+0x38 = %02x %02x (want ef 53)\n",
++		    buf[0x38], buf[0x39]);
++	}
++	/* boot image header "ANDROID!" is page aligned at 0x800 */
++	memset(buf, 0, sizeof(buf));
++	if (!sweet_ufs_read_part("dsp", 0x800, buf, 16)) {
++		printf("SWEET AUDIO: at 0x800: %02x %02x %02x %02x %02x %02x %02x %02x\n",
++		    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
++	}
++
++	/* whole-partition sweep: 64 KiB steps, print every ELF magic hit */
++	uint32_t hits = 0;
++	for (uint64_t off = 0; off + sizeof(sec) <= bytes && hits < 8; off += 0x10000) {
++		if (sweet_ufs_read_part("dsp", off, sec, sizeof(sec))) {
++			continue;
++		}
++		if (sec[0] == 0x7f && sec[1] == 'E' && sec[2] == 'L' && sec[3] == 'F') {
++			printf("SWEET AUDIO: ELF magic at dsp +%#llx\n", (unsigned long long)off);
++			hits++;
++		}
++		if (sec[0] == 0xed && sec[1] == 0x26 && sec[2] == 0xff && sec[3] == 0x3a) {
++			printf("SWEET AUDIO: sparse magic at dsp +%#llx\n", (unsigned long long)off);
++		}
++	}
++	printf("SWEET AUDIO: ELF sweep done, %u hit(s) (64 KiB step)\n", hits);
++
++	/* tail: ext4 backup superblock lives 1024 bytes before the last 4 KiB block */
++	memset(buf, 0, sizeof(buf));
++	if (bytes > 0x2000 && !sweet_ufs_read_part("dsp", bytes - 0x1000, buf, 64)) {
++		printf("SWEET AUDIO: tail -0x1000: %02x %02x %02x %02x %02x %02x %02x %02x\n",
++		    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
++	}
++	printf("SWEET AUDIO: stage 9 done\n");
++}
++
+ static void
+ wl_audio_stage8(void)
+ {
+@@ -3292,6 +3363,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_audio_preflight();
+ 	} else if (wl.stage == 8) {
+ 		wl_audio_stage8();
++	} else if (wl.stage == 9) {
++		wl_audio_stage9();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
