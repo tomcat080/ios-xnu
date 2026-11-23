@@ -1,0 +1,118 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index c804553..35950ab 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3541,6 +3541,104 @@ wl_audio_stage17(void)
+ 	printf("SWEET AUDIO: stage 17 done (no segment write, no AUTH)\n");
+ }
+ 
++/* ---------------------------------------------------------------- stage 18: non-cachable metadata page */
++
++/*
++ * qcom_scm.c: "During the scm call memory protection will be enabled for the
++ * meta data blob, so make sure it's physically contiguous, 4K aligned and
++ * non-cachable to avoid XPU violations."
++ *
++ * stage 14 used KMA_DATA (cacheable) and TZ answered 0xFFCFFFF6.  Here the blob
++ * lives in a wired kernel page that is only ever touched through an uncached
++ * ml_io_map() alias, with the cacheable alias cleaned once after allocation.
++ */
++static void
++wl_audio_stage18(void)
++{
++	static struct wl_fat fat;
++	static uint8_t mdt[8192];
++	struct elf32_ehdr eh;
++	struct elf32_phdr ph;
++	struct mss_scm_regs r;
++	vm_offset_t meta_cached, meta_unc;
++	uint64_t pa;
++	uint32_t cl = 0, size = 0, hcl = 0, hsz = 0, i, len = 0;
++	int err;
++	ppnum_t pn;
++	volatile uint32_t *w;
++
++	printf("SWEET AUDIO: stage 18 start: metadata in wired page, uncached alias\n");
++	if (fat_mount(&fat, "modem")) {
++		printf("SWEET AUDIO: modem FAT mount failed\n");
++		return;
++	}
++	if (kmem_alloc_contig(kernel_map, &meta_cached, AUD_META_PAGE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET AUDIO: metadata alloc failed\n");
++		return;
++	}
++	pn = pmap_find_phys(kernel_pmap, (addr64_t)meta_cached);
++	if (!pn) {
++		printf("SWEET AUDIO: metadata page has no PA\n");
++		return;
++	}
++	pa = (uint64_t)pn * 4096u;
++	/* flush the zero fill first, then never touch the cacheable alias again */
++	sweet_dma_sync_va((const void *)meta_cached, AUD_META_PAGE);
++
++	meta_unc = ml_io_map(pa, AUD_META_PAGE);
++	if (meta_unc == 0) {
++		printf("SWEET AUDIO: uncached alias of %#llx failed\n", pa);
++		return;
++	}
++
++	err = fat_open(&fat, "image/adsp.mdt", &cl, &size);
++	if (err || size > sizeof(mdt)) {
++		printf("SWEET AUDIO: adsp.mdt open failed %d (size %u)\n", err, size);
++		return;
++	}
++	if ((err = fat_read_chain(&fat, cl, 0, mdt, size))) {
++		printf("SWEET AUDIO: adsp.mdt read failed %d\n", err);
++		return;
++	}
++	memcpy((void *)meta_unc, mdt, size);
++	memcpy(&eh, mdt, sizeof(eh));
++	len = size;
++	for (i = 0; i < eh.e_phnum; i++) {
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		if ((ph.p_flags & MDT_TYPE_MASK) != MDT_TYPE_HASH) {
++			continue;
++		}
++		if (fat_open(&fat, "image/adsp.b01", &hcl, &hsz) || hsz != ph.p_filesz
++		    || len + hsz > AUD_META_PAGE) {
++			printf("SWEET AUDIO: hash segment unusable\n");
++			return;
++		}
++		if ((err = fat_read_chain(&fat, hcl, 0, (uint8_t *)meta_unc + len, hsz))) {
++			printf("SWEET AUDIO: hash read failed %d\n", err);
++			return;
++		}
++		len += hsz;
++		break;
++	}
++	w = (volatile uint32_t *)meta_unc;
++	printf("SWEET AUDIO: metadata %u bytes at pa %#llx, head %08x %08x tail %08x\n", len, pa,
++	    w[0], w[1], w[(len / 4u) - 1u]);
++
++	if (aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, pa, len,
++	    "PAS_INIT_IMAGE(uncached)", &r)) {
++		printf("SWEET AUDIO: INIT rejected for uncached page; stop\n");
++		return;
++	}
++	printf("SWEET AUDIO: INIT accepted for uncached kernel page\n");
++	if (aud_pas_call(AUD_CMD_PAS_SETUP, AUD_ARGINFO_SETUP, AUD_PAS_ID, AUD_ADSP_PA, AUD_ADSP_SIZE,
++	    "PAS_MEM_SETUP(carve-out)", &r)) {
++		printf("SWEET AUDIO: MEM_SETUP rejected; stop\n");
++		return;
++	}
++	printf("SWEET AUDIO: stage 18 done (no segment write, no AUTH)\n");
++}
++
+ /* ---------------------------------------------------------------- stage 13: ADSP segment load */
+ 
+ static uint32_t
+@@ -4117,6 +4215,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_audio_stage16();
+ 	} else if (wl.stage == 17) {
+ 		wl_audio_stage17();
++	} else if (wl.stage == 18) {
++		wl_audio_stage18();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
