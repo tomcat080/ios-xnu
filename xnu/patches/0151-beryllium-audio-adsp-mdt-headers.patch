@@ -1,0 +1,87 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 59659fa..66bdb1a 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3237,6 +3237,73 @@ wl_dsp_part_scan(void)
+ 	}
+ }
+ 
++/* ---------------------------------------------------------------- stage 12: ADSP.MDT headers */
++
++static void
++wl_audio_stage12(void)
++{
++	static struct wl_fat fat;
++	static uint8_t mdt[8192];
++	struct elf32_ehdr eh;
++	uint32_t cl = 0, size = 0;
++	uint32_t span_lo = ~0u, span_hi = 0;
++	uint64_t total = 0;
++	uint32_t nload = 0;
++	int err;
++
++	printf("SWEET AUDIO: stage 12 start: ADSP.MDT program headers (read-only)\n");
++	err = fat_mount(&fat, "modem");
++	if (err) {
++		printf("SWEET AUDIO: modem FAT mount failed %d\n", err);
++		return;
++	}
++	err = fat_open(&fat, "image/adsp.mdt", &cl, &size);
++	if (err) {
++		printf("SWEET AUDIO: image/adsp.mdt not found (%d)\n", err);
++		return;
++	}
++	printf("SWEET AUDIO: image/adsp.mdt %u bytes, cluster %u\n", size, cl);
++	if (size > sizeof(mdt)) {
++		printf("SWEET AUDIO: adsp.mdt too big for buffer\n");
++		return;
++	}
++	err = fat_read_chain(&fat, cl, 0, mdt, size);
++	if (err) {
++		printf("SWEET AUDIO: adsp.mdt read failed %d\n", err);
++		return;
++	}
++	memcpy(&eh, mdt, sizeof(eh));
++	if (memcmp(eh.e_ident, "\x7f" "ELF", 4) != 0) {
++		printf("SWEET AUDIO: adsp.mdt not an ELF\n");
++		return;
++	}
++	printf("SWEET AUDIO: adsp.mdt entry %#x phoff %#x phnum %u class %u\n",
++	    eh.e_entry, eh.e_phoff, eh.e_phnum, eh.e_ident[4]);
++	for (uint32_t i = 0; i < eh.e_phnum; i++) {
++		struct elf32_phdr ph;
++		bool hash, load;
++
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		hash = (ph.p_flags & MDT_TYPE_MASK) == MDT_TYPE_HASH;
++		load = ph.p_type == 1 && ph.p_memsz != 0 && !hash;
++		printf("SWEET AUDIO: ph%02u type %u off %#x paddr %#x filesz %#x memsz %#x flags %#x%s%s%s\n",
++		    i, ph.p_type, ph.p_offset, ph.p_paddr, ph.p_filesz, ph.p_memsz, ph.p_flags,
++		    hash ? " HASH" : "", load ? "" : " noload",
++		    (ph.p_flags & MDT_RELOCATABLE) ? " RELOC" : "");
++		if (load) {
++			nload++;
++			span_lo = MIN(span_lo, ph.p_paddr);
++			span_hi = MAX(span_hi, ph.p_paddr + ph.p_memsz);
++			total += ph.p_filesz;
++		}
++	}
++	printf("SWEET AUDIO: ADSP loadable %u, span %#x..%#x (%u KiB), file bytes %llu\n",
++	    nload, span_lo, span_hi, (span_hi - span_lo) >> 10, (unsigned long long)total);
++	printf("SWEET AUDIO: ADSP carve-out base %#x, so span %s the carve-out\n", AUD_ADSP_PA,
++	    (span_lo >= AUD_ADSP_PA && span_hi <= AUD_ADSP_PA + 0x1e00000) ? "inside" : "NOT inside");
++	printf("SWEET AUDIO: stage 12 done\n");
++}
++
+ /* ---------------------------------------------------------------- stage 11: modem FAT listing */
+ 
+ static void
+@@ -3604,6 +3671,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_audio_stage10();
+ 	} else if (wl.stage == 11) {
+ 		wl_audio_stage11();
++	} else if (wl.stage == 12) {
++		wl_audio_stage12();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
