@@ -1,0 +1,114 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 4ed1a52..c804553 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3447,6 +3447,100 @@ wl_audio_stage16(void)
+ 	printf("SWEET AUDIO: stage 16 done\n");
+ }
+ 
++/* ---------------------------------------------------------------- stage 17: metadata inside carve-out */
++
++/*
++ * Vendor layout (drivers/soc/qcom/peripheral-loader.c pil_boot):
++ *   init_image(desc, fw->data, fw->size, priv->region_start, priv->region)
++ * i.e. the mdt+hash blob is copied to the FIRST bytes of the peripheral's
++ * carve-out and that physical address is what PAS_INIT_IMAGE receives.
++ * TZ only exposes that region to the auth engine; a random kernel page (0x4124b000
++ * in stage 14) is refused with 0xFFCFFFF6.
++ */
++#define AUD_META_PAGE   0x4000u
++
++static void
++wl_audio_stage17(void)
++{
++	static struct wl_fat fat;
++	static uint8_t mdt[8192];
++	struct elf32_ehdr eh;
++	struct elf32_phdr ph;
++	struct mss_scm_regs r;
++	vm_offset_t meta;
++	uint32_t cl = 0, size = 0, hcl = 0, hsz = 0, i, len = 0;
++	int err;
++	volatile uint32_t *w;
++
++	printf("SWEET AUDIO: stage 17 start: metadata at carve-out base (vendor layout)\n");
++	if (fat_mount(&fat, "modem")) {
++		printf("SWEET AUDIO: modem FAT mount failed\n");
++		return;
++	}
++	meta = ml_io_map(AUD_ADSP_PA, AUD_META_PAGE);
++	if (meta == 0) {
++		printf("SWEET AUDIO: carve-out base 0x%08x map failed\n", AUD_ADSP_PA);
++		return;
++	}
++	memset((void *)meta, 0, AUD_META_PAGE);
++
++	err = fat_open(&fat, "image/adsp.mdt", &cl, &size);
++	if (err || size > sizeof(mdt)) {
++		printf("SWEET AUDIO: adsp.mdt open failed %d (size %u)\n", err, size);
++		return;
++	}
++	if ((err = fat_read_chain(&fat, cl, 0, mdt, size))) {
++		printf("SWEET AUDIO: adsp.mdt read failed %d\n", err);
++		return;
++	}
++	memcpy((void *)meta, mdt, size);
++	memcpy(&eh, mdt, sizeof(eh));
++	len = size;
++
++	for (i = 0; i < eh.e_phnum; i++) {
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		if ((ph.p_flags & MDT_TYPE_MASK) != MDT_TYPE_HASH) {
++			continue;
++		}
++		if (fat_open(&fat, "image/adsp.b01", &hcl, &hsz)) {
++			printf("SWEET AUDIO: hash segment open failed\n");
++			return;
++		}
++		if (hsz != ph.p_filesz || len + hsz > AUD_META_PAGE) {
++			printf("SWEET AUDIO: hash %u vs filesz %#x, no room at len %u\n", hsz,
++			    ph.p_filesz, len);
++			return;
++		}
++		if ((err = fat_read_chain(&fat, hcl, 0, (uint8_t *)meta + len, hsz))) {
++			printf("SWEET AUDIO: hash read failed %d\n", err);
++			return;
++		}
++		len += hsz;
++		break;
++	}
++
++	w = (volatile uint32_t *)meta;
++	printf("SWEET AUDIO: metadata %u bytes written to %#08x (head %08x %08x, tail %08x)\n", len,
++	    AUD_ADSP_PA, w[0], w[1], w[(len / 4u) - 1u]);
++	/* carve-out sits in no-map space: ml_io_map gives an uncached alias, no cache flush needed */
++
++	if (aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, AUD_ADSP_PA, len,
++	    "PAS_INIT_IMAGE(carve-out)", &r)) {
++		printf("SWEET AUDIO: INIT rejected at carve-out base; stop\n");
++		return;
++	}
++	printf("SWEET AUDIO: INIT accepted, metadata hash verified by TZ\n");
++
++	if (aud_pas_call(AUD_CMD_PAS_SETUP, AUD_ARGINFO_SETUP, AUD_PAS_ID, AUD_ADSP_PA, AUD_ADSP_SIZE,
++	    "PAS_MEM_SETUP(carve-out)", &r)) {
++		printf("SWEET AUDIO: MEM_SETUP rejected; stop before segment write\n");
++		return;
++	}
++	printf("SWEET AUDIO: MEM_SETUP accepted, %#x..%#x handed to ADSP\n", AUD_ADSP_PA,
++	    AUD_ADSP_PA + AUD_ADSP_SIZE);
++	printf("SWEET AUDIO: stage 17 done (no segment write, no AUTH)\n");
++}
++
+ /* ---------------------------------------------------------------- stage 13: ADSP segment load */
+ 
+ static uint32_t
+@@ -4021,6 +4115,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_audio_stage15();
+ 	} else if (wl.stage == 16) {
+ 		wl_audio_stage16();
++	} else if (wl.stage == 17) {
++		wl_audio_stage17();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
