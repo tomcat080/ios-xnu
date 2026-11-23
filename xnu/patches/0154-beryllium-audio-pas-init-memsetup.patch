@@ -1,0 +1,138 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 06261f6..1c13f6d 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3238,6 +3238,124 @@ wl_dsp_part_scan(void)
+ 	}
+ }
+ 
++/* ---------------------------------------------------------------- stage 14: PAS metadata + mem setup */
++
++#define AUD_PAS_ID          1u              /* SDM845 adsp-pas: qcom,pas-id 1 */
++#define AUD_META_SIZE       0x4000u         /* 16 KiB: 7516 B mdt + 0x1b28 hash */
++#define AUD_ARGINFO_INIT    0x82u           /* QCOM_SCM_ARGS(2, VAL, RW) */
++#define AUD_ARGINFO_SETUP   0x03u           /* QCOM_SCM_ARGS(3) */
++
++static uint8_t *aud_meta;                   /* physically contiguous metadata blob */
++static uint64_t aud_meta_pa;
++
++static int
++aud_pas_call(uint32_t cmd, uint32_t arginfo, uint64_t a1, uint64_t a2, uint64_t a3,
++    const char *name, struct mss_scm_regs *out)
++{
++	struct mss_scm_regs init, r;
++
++	init = (struct mss_scm_regs) { {
++		MSS_SCM_64 | MSS_SCM_SIP | AUD_SVC_PIL | cmd,
++		arginfo, a1, a2, a3, 0, 0, 0
++	} };
++	printf("SWEET AUDIO: %s: x0=%#llx x1=%#llx x2=%#llx x3=%#llx x4=%#llx\n", name,
++	    init.a[0], init.a[1], init.a[2], init.a[3], init.a[4]);
++	if (!mss_scm_invoke(&init, &r)) {
++		printf("SWEET AUDIO: %s did not complete\n", name);
++		return -1;
++	}
++	printf("SWEET AUDIO: %s status=%d result=%llu\n", name, (int32_t)r.a[0], r.a[1]);
++	*out = r;
++	return (int32_t)r.a[0];
++}
++
++static uint32_t
++aud_meta_build(struct wl_fat *fat)
++{
++	struct elf32_ehdr eh;
++	struct elf32_phdr ph;
++	static uint8_t mdt[8192];
++	uint32_t cl = 0, size = 0, hcl = 0, hsz = 0, hoff = 0, i;
++	int err;
++	ppnum_t pn;
++
++	if (kmem_alloc_contig(kernel_map, (vm_offset_t *)&aud_meta, AUD_META_SIZE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET AUDIO: metadata alloc failed\n");
++		return 0;
++	}
++	pn = pmap_find_phys(kernel_pmap, (addr64_t)aud_meta);
++	if (!pn) {
++		printf("SWEET AUDIO: metadata has no physical page\n");
++		return 0;
++	}
++	aud_meta_pa = (uint64_t)pn * 4096u;
++
++	err = fat_open(fat, "image/adsp.mdt", &cl, &size);
++	if (err || size > sizeof(mdt)) {
++		printf("SWEET AUDIO: adsp.mdt open failed %d\n", err);
++		return 0;
++	}
++	if ((err = fat_read_chain(fat, cl, 0, mdt, size))) {
++		printf("SWEET AUDIO: adsp.mdt read failed %d\n", err);
++		return 0;
++	}
++	memcpy(aud_meta, mdt, size);
++	memcpy(&eh, mdt, sizeof(eh));
++	/* Append the hash segment after the .mdt bytes, as qcom_mdt_read_metadata does. */
++	hoff = size;
++	for (i = 0; i < eh.e_phnum; i++) {
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		if ((ph.p_flags & MDT_TYPE_MASK) != MDT_TYPE_HASH) {
++			continue;
++		}
++		if (fat_open(fat, "image/adsp.b01", &hcl, &hsz)) {
++			printf("SWEET AUDIO: hash segment open failed\n");
++			return 0;
++		}
++		if (hsz != ph.p_filesz || hoff + hsz > AUD_META_SIZE) {
++			printf("SWEET AUDIO: hash %u vs filesz %#x, no room\n", hsz, ph.p_filesz);
++			return 0;
++		}
++		if ((err = fat_read_chain(fat, hcl, 0, aud_meta + hoff, hsz))) {
++			printf("SWEET AUDIO: hash read failed %d\n", err);
++			return 0;
++		}
++		break;
++	}
++	sweet_dma_sync_va(aud_meta, AUD_META_SIZE);
++	printf("SWEET AUDIO: metadata %u + %u bytes at %#llx (pa %#llx)\n", size, hsz, hoff,
++	    aud_meta_pa);
++	return hoff + hsz;
++}
++
++static void
++wl_audio_stage14(void)
++{
++	static struct wl_fat fat;
++	struct mss_scm_regs r;
++	uint32_t len;
++
++	printf("SWEET AUDIO: stage 14 start: INIT_IMAGE + MEM_SETUP, no segment write\n");
++	if (fat_mount(&fat, "modem")) {
++		printf("SWEET AUDIO: modem FAT mount failed\n");
++		return;
++	}
++	len = aud_meta_build(&fat);
++	if (!len) {
++		printf("SWEET AUDIO: metadata build failed\n");
++		return;
++	}
++	if (aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, aud_meta_pa, len,
++	    "PAS_INIT_IMAGE", &r)) {
++		printf("SWEET AUDIO: INIT_IMAGE rejected; stop before MEM_SETUP\n");
++		return;
++	}
++	aud_pas_call(AUD_CMD_PAS_SETUP, AUD_ARGINFO_SETUP, AUD_PAS_ID, AUD_ADSP_PA, AUD_ADSP_SIZE,
++	    "PAS_MEM_SETUP", &r);
++	printf("SWEET AUDIO: stage 14 done (no AUTH, no segment write)\n");
++}
++
+ /* ---------------------------------------------------------------- stage 13: ADSP segment load */
+ 
+ static uint32_t
+@@ -3806,6 +3924,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_audio_stage12();
+ 	} else if (wl.stage == 13) {
+ 		wl_audio_stage13();
++	} else if (wl.stage == 14) {
++		wl_audio_stage14();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
