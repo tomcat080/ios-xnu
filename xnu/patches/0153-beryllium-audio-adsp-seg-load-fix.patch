@@ -1,0 +1,71 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 9f8afbc..06261f6 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3117,6 +3117,7 @@ wl_mss_assign_scratch(void)
+ #define AUD_LPASS_SWAY     0x47008u
+ #define AUD_ADSP_PA        0x8c500000u
+ #define AUD_ADSP_PAGE      0x00001000u
++#define AUD_ADSP_SIZE      0x01e00000u      /* beryllium adsp_mem: 30 MiB */
+ #define AUD_SVC_PIL        0x0200u
+ #define AUD_CMD_PAS_INIT   0x01u
+ #define AUD_CMD_PAS_SETUP  0x02u
+@@ -3240,7 +3241,7 @@ wl_dsp_part_scan(void)
+ /* ---------------------------------------------------------------- stage 13: ADSP segment load */
+ 
+ static uint32_t
+-adsp_mdt_load(struct wl_fat *fat, bool write_segments)
++adsp_mdt_load(struct wl_fat *fat, bool write_segments, uint32_t max_seg)
+ {
+ 	static uint8_t mdt[8192];
+  struct elf32_ehdr eh;
+@@ -3270,6 +3271,12 @@ adsp_mdt_load(struct wl_fat *fat, bool write_segments)
+ 
+ 		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
+ 		hash = (ph.p_flags & MDT_TYPE_MASK) == MDT_TYPE_HASH;
++		if (!hash && ph.p_type != 1) {
++			/* PT_NULL carries the MDT segment table (p_paddr 0): never write it. */
++			printf("SWEET AUDIO: ph%02u type %u skipped (%u bytes, paddr %#x)\n", i,
++			    ph.p_type, ph.p_filesz, ph.p_paddr);
++			continue;
++		}
+ 		if (ph.p_filesz == 0) {
+ 			if (ph.p_memsz && ph.p_type == 1) {
+ 				printf("SWEET AUDIO: ph%02u bss %#x bytes at %#x (no file)\n", i,
+@@ -3301,6 +3308,12 @@ adsp_mdt_load(struct wl_fat *fat, bool write_segments)
+ 			printf("SWEET AUDIO: ph%02u would load %u bytes -> %#x\n", i, fsz, ph.p_paddr);
+ 			continue;
+ 		}
++		if (ph.p_paddr < AUD_ADSP_PA ||
++		    ph.p_paddr + ph.p_memsz > AUD_ADSP_PA + AUD_ADSP_SIZE) {
++			printf("SWEET AUDIO: ph%02u %#x+%#x outside carve-out, skipped\n", i,
++			    ph.p_paddr, ph.p_memsz);
++			continue;
++		}
+ 		map_sz = (uint32_t)((ph.p_memsz + 0xfff) & ~0xfffu);
+ 		map = ml_io_map(ph.p_paddr, map_sz);
+ 		if (map == 0) {
+@@ -3317,8 +3330,14 @@ adsp_mdt_load(struct wl_fat *fat, bool write_segments)
+ 		}
+ 		total += fsz;
+ 		nload++;
++		if (max_seg && nload >= max_seg) {
++			printf("SWEET AUDIO: stopping after %u segment(s) on request\n", nload);
++			break;
++		}
+ 		printf("SWEET AUDIO: ph%02u loaded %u bytes -> %#x (+bss %#x)\n", i, fsz, ph.p_paddr,
+ 		    ph.p_memsz - ph.p_filesz);
++		printf("SWEET AUDIO: ph%02u read back first %08x last %08x\n", i,
++		    wl_rd(map, 0), wl_rd(map, fsz - 4));
+ 	}
+ 	printf("SWEET AUDIO: segments loaded %u, hash %u, bytes %llu\n", nload, nhash,
+ 	    (unsigned long long)total);
+@@ -3337,7 +3356,7 @@ wl_audio_stage13(void)
+ 		printf("SWEET AUDIO: modem FAT mount failed\n");
+ 		return;
+ 	}
+-	if (adsp_mdt_load(&fat, true) == 0) {
++	if (adsp_mdt_load(&fat, true, 1) == 0) {
+ 		printf("SWEET AUDIO: nothing loaded\n");
+ 		return;
+ 	}
