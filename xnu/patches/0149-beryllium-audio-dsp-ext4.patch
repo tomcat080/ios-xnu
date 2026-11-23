@@ -1,0 +1,175 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 9a54026..3f5e483 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3237,6 +3237,161 @@ wl_dsp_part_scan(void)
+ 	}
+ }
+ 
++/* ---------------------------------------------------------------- stage 10: dsp ext4 listing */
++
++static struct {
++	uint32_t bs;
++	uint32_t first_data_block;
++	uint32_t ipg;            /* inodes per group */
++	uint32_t inode_size;
++	uint32_t desc_size;
++	uint32_t itable_lo;      /* group 0 inode table block */
++} ext4;
++
++static int
++dsp_read(uint64_t off, void *dst, uint64_t len)
++{
++	return sweet_ufs_read_part("dsp", off, dst, len);
++}
++
++static int
++ext4_inode(uint32_t ino, uint8_t *out)
++{
++	uint8_t gd[64];
++	uint32_t group = (ino - 1) / ext4.ipg;
++	uint32_t index = (ino - 1) % ext4.ipg;
++	uint64_t gdt = (uint64_t)(ext4.first_data_block + 1) * ext4.bs + (uint64_t)group * ext4.desc_size;
++	uint32_t table;
++	uint64_t off;
++
++	memset(gd, 0, sizeof(gd));
++	if (dsp_read(gdt, gd, ext4.desc_size > 64 ? 64 : ext4.desc_size)) {
++		return 1;
++	}
++	table = *(uint32_t *)(gd + 8);
++	off = (uint64_t)table * ext4.bs + (uint64_t)index * ext4.inode_size;
++	memset(out, 0, 512);
++	return dsp_read(off, out, ext4.inode_size > 512 ? 512 : ext4.inode_size);
++}
++
++static int
++ext4_extent_first_block(const uint8_t *inode, uint32_t *out_block, uint32_t *out_len)
++{
++	const uint8_t *ib = inode + 0x28;      /* i_block[15] */
++	uint16_t magic = *(uint16_t *)(ib);
++	uint16_t depth = *(uint16_t *)(ib + 6);
++	uint16_t entries = *(uint16_t *)(ib + 2);
++
++	if (magic != 0xf30a) {
++		return 2;                      /* not an extent tree (ext2/3 block map) */
++	}
++	if (entries == 0) {
++		return 3;
++	}
++	if (depth != 0) {
++		return 4;
++	}
++	{
++		const uint8_t *ee = ib + 12;
++		uint16_t len = *(uint16_t *)(ee + 4);
++		uint32_t start = *(uint32_t *)(ee + 8);
++		*out_block = start;
++		*out_len = len & 0x7fff;
++		return 0;
++	}
++}
++
++static void
++ext4_list_dir(uint32_t ino, const char *label)
++{
++	uint8_t inode[512];
++	uint8_t block[4096];
++	uint32_t first = 0, count = 0;
++	int err = ext4_inode(ino, inode);
++
++	if (err) {
++		printf("SWEET AUDIO: %s inode %u read failed %d\n", label, ino, err);
++		return;
++	}
++	printf("SWEET AUDIO: %s inode %u size %u mode %#x\n", label, ino,
++	    *(uint32_t *)(inode + 4), *(uint16_t *)(inode + 0));
++	err = ext4_extent_first_block(inode, &first, &count);
++	if (err) {
++		printf("SWEET AUDIO: %s inode %u extent parse %d\n", label, ino, err);
++		return;
++	}
++	for (uint32_t b = 0; b < (count > 4 ? 4 : count); b++) {
++		uint64_t off = (uint64_t)(first + b) * ext4.bs;
++		if (ext4.bs > sizeof(block) || dsp_read(off, block, ext4.bs)) {
++			return;
++		}
++		for (uint32_t pos = 0; pos + 8 <= ext4.bs;) {
++			uint32_t ino2 = *(uint32_t *)(block + pos);
++			uint16_t rec = *(uint16_t *)(block + pos + 4);
++			uint8_t nlen = block[pos + 6];
++			uint8_t ftype = block[pos + 7];
++
++			if (rec < 8 || pos + rec > ext4.bs) {
++				break;
++			}
++			if (ino2 && nlen && nlen < 256) {
++				printf("SWEET AUDIO: %s entry ino %u type %u name %.*s\n", label,
++				    ino2, ftype, nlen, (const char *)(block + pos + 8));
++			}
++			pos += rec;
++		}
++	}
++}
++
++static void
++wl_audio_stage10(void)
++{
++	uint8_t sb[1024];
++	uint32_t blocks_count, inodes_count, bpg;
++	uint32_t elf_offs[3] = { 0x850000, 0xda0000, 0x1000000 };
++	uint8_t eh[64];
++
++	printf("SWEET AUDIO: stage 10 start: dsp ext4 listing + ELF headers (read-only)\n");
++	if (dsp_read(1024, sb, sizeof(sb)) || *(uint16_t *)(sb + 0x38) != 0xef53) {
++		printf("SWEET AUDIO: no ext4 superblock at 1024\n");
++		return;
++	}
++	ext4.bs = 1024u << *(uint32_t *)(sb + 0x18);
++	ext4.first_data_block = *(uint32_t *)(sb + 0x14);
++	inodes_count = *(uint32_t *)(sb + 0x00);
++	blocks_count = *(uint32_t *)(sb + 0x04);
++	bpg = *(uint32_t *)(sb + 0x20);
++	ext4.ipg = *(uint32_t *)(sb + 0x28);
++	ext4.inode_size = *(uint16_t *)(sb + 0x58);
++	ext4.desc_size = *(uint16_t *)(sb + 0xfe);
++	if (ext4.inode_size < 128 || ext4.inode_size > 512) {
++		ext4.inode_size = 128;
++	}
++	if (ext4.desc_size < 32 || ext4.desc_size > 64) {
++		ext4.desc_size = 32;
++	}
++	printf("SWEET AUDIO: ext4 bs %u blocks %u inodes %u bpg %u ipg %u isize %u dsize %u fdb %u\n",
++	    ext4.bs, blocks_count, inodes_count, bpg, ext4.ipg, ext4.inode_size, ext4.desc_size,
++	    ext4.first_data_block);
++
++	ext4_list_dir(2, "root");
++	/* the interesting dirs on Android firmware partitions */
++	ext4_list_dir(11, "?11");
++	ext4_list_dir(12, "?12");
++
++	for (unsigned i = 0; i < 3; i++) {
++		memset(eh, 0, sizeof(eh));
++		if (dsp_read(elf_offs[i], eh, sizeof(eh)) || eh[0] != 0x7f || eh[1] != 'E') {
++			printf("SWEET AUDIO: elf @%#x: no ELF header\n", elf_offs[i]);
++			continue;
++		}
++		printf("SWEET AUDIO: elf @%#x type %u machine %u entry %#llx phoff %#llx phnum %u\n",
++		    elf_offs[i], *(uint16_t *)(eh + 16), *(uint16_t *)(eh + 18),
++		    *(uint64_t *)(eh + 24), *(uint64_t *)(eh + 32), *(uint16_t *)(eh + 56));
++	}
++	printf("SWEET AUDIO: stage 10 done\n");
++}
++
+ /* ---------------------------------------------------------------- stage 9: dsp container hunt */
+ 
+ static void
+@@ -3365,6 +3520,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_audio_stage8();
+ 	} else if (wl.stage == 9) {
+ 		wl_audio_stage9();
++	} else if (wl.stage == 10) {
++		wl_audio_stage10();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
