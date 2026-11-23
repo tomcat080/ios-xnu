@@ -1,0 +1,104 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 6c84cee..f0be823 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3238,49 +3238,6 @@ wl_dsp_part_scan(void)
+ 	}
+ }
+ 
+-/* ---------------------------------------------------------------- stage 15: PAS INIT argument probing */
+-
+-static void
+-wl_audio_stage15(void)
+-{
+-	static struct wl_fat fat;
+-	struct mss_scm_regs r;
+-	uint32_t len, id, i;
+-	static const uint32_t arginfo[3] = {
+-		0x43,   /* QCOM_SCM_ARGS(3, VAL, RO, VAL): downstream msm-4.9 form */
+-		0x83,   /* QCOM_SCM_ARGS(3, VAL, RW, VAL) */
+-		0x82,   /* QCOM_SCM_ARGS(2, VAL, RW): upstream form, already failed */
+-	};
+-
+-	printf("SWEET AUDIO: stage 15 start: probe PAS_INIT_IMAGE arginfo/pas_id\n");
+-	if (fat_mount(&fat, "modem")) {
+-		printf("SWEET AUDIO: modem FAT mount failed\n");
+-		return;
+-	}
+-	len = aud_meta_build(&fat);
+-	if (!len) {
+-		printf("SWEET AUDIO: metadata build failed\n");
+-		return;
+-	}
+-	for (i = 0; i < 3; i++) {
+-		printf("SWEET AUDIO: try arginfo %#x pas_id 1 len %u\n", arginfo[i], len);
+-		if (!aud_pas_call(AUD_CMD_PAS_INIT, arginfo[i], AUD_PAS_ID, aud_meta_pa, len,
+-		    "PAS_INIT_IMAGE", &r)) {
+-			printf("SWEET AUDIO: INIT ok with arginfo %#x\n", arginfo[i]);
+-			return;
+-		}
+-	}
+-	for (id = 2; id <= 5; id++) {
+-		printf("SWEET AUDIO: try pas_id %u with arginfo %#x\n", id, arginfo[0]);
+-		if (!aud_pas_call(AUD_CMD_PAS_INIT, arginfo[0], id, aud_meta_pa, len,
+-		    "PAS_INIT_IMAGE", &r)) {
+-			printf("SWEET AUDIO: INIT ok with pas_id %u\n", id);
+-			return;
+-		}
+-	}
+-	printf("SWEET AUDIO: all INIT probes rejected\n");
+-}
+-
+ /* ---------------------------------------------------------------- stage 14: PAS metadata + mem setup */
+ 
+ #define AUD_PAS_ID          1u              /* SDM845 adsp-pas: qcom,pas-id 1 */
+@@ -3399,6 +3356,49 @@ wl_audio_stage14(void)
+ 	printf("SWEET AUDIO: stage 14 done (no AUTH, no segment write)\n");
+ }
+ 
++/* ---------------------------------------------------------------- stage 15: PAS INIT argument probing */
++
++static void
++wl_audio_stage15(void)
++{
++	static struct wl_fat fat;
++	struct mss_scm_regs r;
++	uint32_t len, id, i;
++	static const uint32_t arginfo[3] = {
++		0x43,   /* QCOM_SCM_ARGS(3, VAL, RO, VAL): downstream msm-4.9 form */
++		0x83,   /* QCOM_SCM_ARGS(3, VAL, RW, VAL) */
++		0x82,   /* QCOM_SCM_ARGS(2, VAL, RW): upstream form, already failed */
++	};
++
++	printf("SWEET AUDIO: stage 15 start: probe PAS_INIT_IMAGE arginfo/pas_id\n");
++	if (fat_mount(&fat, "modem")) {
++		printf("SWEET AUDIO: modem FAT mount failed\n");
++		return;
++	}
++	len = aud_meta_build(&fat);
++	if (!len) {
++		printf("SWEET AUDIO: metadata build failed\n");
++		return;
++	}
++	for (i = 0; i < 3; i++) {
++		printf("SWEET AUDIO: try arginfo %#x pas_id 1 len %u\n", arginfo[i], len);
++		if (!aud_pas_call(AUD_CMD_PAS_INIT, arginfo[i], AUD_PAS_ID, aud_meta_pa, len,
++		    "PAS_INIT_IMAGE", &r)) {
++			printf("SWEET AUDIO: INIT ok with arginfo %#x\n", arginfo[i]);
++			return;
++		}
++	}
++	for (id = 2; id <= 5; id++) {
++		printf("SWEET AUDIO: try pas_id %u with arginfo %#x\n", id, arginfo[0]);
++		if (!aud_pas_call(AUD_CMD_PAS_INIT, arginfo[0], id, aud_meta_pa, len,
++		    "PAS_INIT_IMAGE", &r)) {
++			printf("SWEET AUDIO: INIT ok with pas_id %u\n", id);
++			return;
++		}
++	}
++	printf("SWEET AUDIO: all INIT probes rejected\n");
++}
++
+ /* ---------------------------------------------------------------- stage 13: ADSP segment load */
+ 
+ static uint32_t
