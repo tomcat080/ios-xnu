@@ -1,8 +1,8 @@
 diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
-index 195bf33..0aa1969 100644
+index 195bf33..69601c5 100644
 --- a/bsd/dev/beryllium_wlan.c
 +++ b/bsd/dev/beryllium_wlan.c
-@@ -3183,6 +3183,99 @@ wl_audio_preflight(void)
+@@ -3183,6 +3183,87 @@ wl_audio_preflight(void)
  }
  
  
@@ -66,7 +66,7 @@ index 195bf33..0aa1969 100644
 +	vm_offset_t gcc = 0, adsp = 0;
 +	uint32_t q6, sway, ad;
 +
-+	printf("SWEET AUDIO: stage 8 start: dsp partition scan + LPASS CBCR enable probe (no PAS, no reset)\n");
++	printf("SWEET AUDIO: stage 8 start: dsp partition scan + LPASS state read (read-only, no write)\n");
 +	wl_dsp_part_scan();
 +
 +	gcc = ml_io_map(AUD_GCC_PA, AUD_GCC_SIZE);
@@ -76,25 +76,13 @@ index 195bf33..0aa1969 100644
 +	}
 +	q6 = wl_rd(gcc, AUD_LPASS_Q6_AXI);
 +	sway = wl_rd(gcc, AUD_LPASS_SWAY);
-+	printf("SWEET AUDIO: before: q6_axi %#x (CLK_OFF %u), sway %#x (CLK_OFF %u)\n",
-+	    q6, (q6 >> 31) & 1u, sway, (sway >> 31) & 1u);
-+	if ((q6 & 1u) == 0) {
-+		wl_wr(gcc, AUD_LPASS_Q6_AXI, q6 | 1u);
-+	}
-+	if ((sway & 1u) == 0) {
-+		wl_wr(gcc, AUD_LPASS_SWAY, sway | 1u);
-+	}
-+	delay(200);
-+	q6 = wl_rd(gcc, AUD_LPASS_Q6_AXI);
-+	sway = wl_rd(gcc, AUD_LPASS_SWAY);
-+	printf("SWEET AUDIO: after: q6_axi %#x (CLK_OFF %u, ON %u), sway %#x (CLK_OFF %u, ON %u)\n",
++	printf("SWEET AUDIO: q6_axi %#x (CLK_OFF %u, ON %u), sway %#x (CLK_OFF %u, ON %u)\n",
 +	    q6, (q6 >> 31) & 1u, q6 & 1u, sway, (sway >> 31) & 1u, sway & 1u);
-+	printf("SWEET AUDIO: clocks left enabled for the next gate\n");
 +
 +	adsp = ml_io_map(AUD_ADSP_PA, AUD_ADSP_PAGE);
 +	if (adsp != 0) {
 +		ad = wl_rd(adsp, 0);
-+		printf("SWEET AUDIO: ADSP 0x%08x +0 still %#x after CBCR write\n", AUD_ADSP_PA, ad);
++		printf("SWEET AUDIO: ADSP 0x%08x +0 %#x\n", AUD_ADSP_PA, ad);
 +	}
 +	printf("SWEET AUDIO: stage 8 done\n");
 +}
@@ -102,7 +90,7 @@ index 195bf33..0aa1969 100644
  /* ---------------------------------------------------------------- thread */
  
  static void
-@@ -3209,6 +3302,8 @@ wl_thread(void *arg, wait_result_t wr)
+@@ -3209,6 +3290,8 @@ wl_thread(void *arg, wait_result_t wr)
  		wl_mss_assign_scratch();
  	} else if (wl.stage == 7) {
  		wl_audio_preflight();
