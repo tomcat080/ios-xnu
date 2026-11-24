@@ -1,0 +1,139 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index bc90d05..5c584b9 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3799,6 +3799,116 @@ wl_audio_stage19(void)
+ 	printf("SWEET AUDIO: S19 MEM_SETUP rc=%d\n", s19_setup);
+ }
+ 
++static void
++wl_audio_stage20(void)
++{
++	static struct wl_fat fat;
++	static uint8_t mdt[8192];
++	struct elf32_ehdr eh;
++	struct elf32_phdr ph;
++	struct mss_scm_regs r;
++	vm_offset_t meta_cached, meta_unc;
++	uint64_t pa;
++	uint32_t cl = 0, size = 0, hcl = 0, hsz = 0, i, len = 0;
++	int err;
++	ppnum_t pn;
++	volatile uint32_t *w;
++
++	printf("SWEET AUDIO: stage 20 start\n");
++	if (fat_mount(&fat, "modem")) {
++		s19_steps |= S19_FAIL;
++		panic("SWEET S20 fail steps=%#x", s19_steps);
++	}
++		s19_steps |= S19_FAT;
++	printf("SWEET AUDIO: S20 fat mounted\n");
++
++	err = fat_open(&fat, "image/adsp.mdt", &cl, &size);
++	if (err || size > sizeof(mdt) || fat_read_chain(&fat, cl, 0, mdt, size)) {
++		s19_steps |= S19_FAIL;
++		panic("SWEET S20 fail steps=%#x", s19_steps);
++	}
++	memcpy(&eh, mdt, sizeof(eh));
++		s19_steps |= S19_MDT;
++	printf("SWEET AUDIO: S20 mdt read %u bytes, %u phdrs\n", size, eh.e_phnum);
++
++	for (i = 0; i < eh.e_phnum; i++) {
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		if ((ph.p_flags & MDT_TYPE_MASK) != MDT_TYPE_HASH) {
++			continue;
++		}
++		if (fat_open(&fat, "image/adsp.b01", &hcl, &hsz) || hsz != ph.p_filesz
++		    || size + hsz > AUD_META_PAGE) {
++			s19_steps |= S19_FAIL;
++			return;
++		}
++			s19_steps |= S19_HASH;
++	printf("SWEET AUDIO: S20 hash %u bytes\n", hsz);
++		break;
++	}
++	len = size;
++
++	if (kmem_alloc_contig(kernel_map, &meta_cached, AUD_META_PAGE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		s19_steps |= S19_FAIL;
++		panic("SWEET S20 fail steps=%#x", s19_steps);
++	}
++		s19_steps |= S19_ALLOC;
++	printf("SWEET AUDIO: S20 alloc ok pa=%#llx\n", (unsigned long long)pa);
++	pn = pmap_find_phys(kernel_pmap, (addr64_t)meta_cached);
++	if (!pn) {
++		s19_steps |= S19_FAIL;
++		panic("SWEET S20 fail steps=%#x", s19_steps);
++	}
++	pa = (uint64_t)pn * 4096u;
++	sweet_dma_sync_va((const void *)meta_cached, AUD_META_PAGE);
++
++	meta_unc = meta_cached;	/* cached alias only; cleaned after the copy */
++	if (meta_unc == 0) {
++		s19_steps |= S19_FAIL;
++		panic("SWEET S20 fail steps=%#x", s19_steps);
++	}
++		s19_steps |= S19_ALIAS;
++	printf("SWEET AUDIO: S20 uncached alias=%#llx\n", (unsigned long long)meta_unc);
++
++	memcpy((void *)meta_unc, mdt, size);
++	for (i = 0; i < eh.e_phnum; i++) {
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		if ((ph.p_flags & MDT_TYPE_MASK) != MDT_TYPE_HASH) {
++			continue;
++		}
++		if (fat_read_chain(&fat, hcl, 0, (uint8_t *)meta_unc + size, hsz)) {
++			s19_steps |= S19_FAIL;
++			return;
++		}
++		len += hsz;
++		break;
++	}
++		sweet_dma_sync_va((const void *)meta_cached, AUD_META_PAGE);
++		s19_steps |= S19_WRITE;
++	printf("SWEET AUDIO: S20 metadata written %u bytes\n", len);
++
++	w = (volatile uint32_t *)meta_unc;
++	s19_len = len;
++	s19_head = w[0];
++	s19_tail = w[(len / 4u) - 1u];
++		s19_steps |= S19_READBACK;
++	printf("SWEET AUDIO: S20 readback head=%08x tail=%08x\n", s19_head, s19_tail);
++
++	printf("SWEET AUDIO: S20 before INIT\n");
++	s19_steps |= S19_INITCALL;
++	s19_init = aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, pa, len,
++	    "PAS_INIT_IMAGE(S20)", &r);
++	if (s19_init) {
++		return;
++	}
++		s19_steps |= S19_SETUPCALL;
++	printf("SWEET AUDIO: S20 INIT rc=%d\n", s19_init);
++	s19_setup = aud_pas_call(AUD_CMD_PAS_SETUP, AUD_ARGINFO_SETUP, AUD_PAS_ID, AUD_ADSP_PA,
++	    AUD_ADSP_SIZE, "PAS_MEM_SETUP(S20)", &r);
++	printf("SWEET AUDIO: S20 MEM_SETUP rc=%d\n", s19_setup);
++	panic("SWEET S20 init=%d setup=%d steps=%#x len=%u", s19_init, s19_setup, s19_steps, s19_len);
++}
++
+ /* ---------------------------------------------------------------- stage 13: ADSP segment load */
+ 
+ static uint32_t
+@@ -4346,7 +4456,7 @@ wl_thread(void *arg, wait_result_t wr)
+ 		}
+ 	}
+ 	wl_sleep(wl.delay_s * 1000u);
+-	if (wl.stage != 19) {
++	if (wl.stage != 19 && wl.stage != 20) {
+ 		if (!wl_map()) {
+ 			printf("SWEET WLAN: MMIO mapping failed\n");
+ 			goto out;
+@@ -4389,6 +4499,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_audio_stage18();
+ 	} else if (wl.stage == 19) {
+ 		wl_audio_stage19();
++	} else if (wl.stage == 20) {
++		wl_audio_stage20();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
