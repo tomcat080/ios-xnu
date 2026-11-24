@@ -1,0 +1,47 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 4aed40d..bc90d05 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3580,6 +3580,7 @@ wl_audio_stage18(void)
+ 		printf("SWEET AUDIO: modem FAT mount failed\n");
+ 		return;
+ 	}
++	printf("SWEET AUDIO: S19 before alloc\n");
+ 	if (kmem_alloc_contig(kernel_map, &meta_cached, AUD_META_PAGE, PAGE_MASK, 0, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+ 		printf("SWEET AUDIO: metadata alloc failed\n");
+@@ -3594,7 +3595,9 @@ wl_audio_stage18(void)
+ 	/* flush the zero fill first, then never touch the cacheable alias again */
+ 	sweet_dma_sync_va((const void *)meta_cached, AUD_META_PAGE);
+ 
++	printf("SWEET AUDIO: S19 before ml_io_map\n");
+ 	meta_unc = ml_io_map(pa, AUD_META_PAGE);
++	printf("SWEET AUDIO: S19 ml_io_map returned %#llx\n", (unsigned long long)meta_unc);
+ 	if (meta_unc == 0) {
+ 		printf("SWEET AUDIO: uncached alias of %#llx failed\n", pa);
+ 		return;
+@@ -3629,6 +3632,7 @@ wl_audio_stage18(void)
+ 		len += hsz;
+ 		break;
+ 	}
++	printf("SWEET AUDIO: S19 before readback\n");
+ 	w = (volatile uint32_t *)meta_unc;
+ 	printf("SWEET AUDIO: metadata %u bytes at pa %#llx, head %08x %08x tail %08x\n", len, pa,
+ 	    w[0], w[1], w[(len / 4u) - 1u]);
+@@ -3741,7 +3745,7 @@ wl_audio_stage19(void)
+ 		return;
+ 	}
+ 		s19_steps |= S19_ALLOC;
+-	printf("SWEET AUDIO: S19 page pa=%#llx\n", (unsigned long long)pa);
++	printf("SWEET AUDIO: S19 alloc ok pa=%#llx\n", (unsigned long long)pa);
+ 	pn = pmap_find_phys(kernel_pmap, (addr64_t)meta_cached);
+ 	if (!pn) {
+ 		s19_steps |= S19_FAIL;
+@@ -3781,6 +3785,7 @@ wl_audio_stage19(void)
+ 		s19_steps |= S19_READBACK;
+ 	printf("SWEET AUDIO: S19 readback head=%08x tail=%08x\n", s19_head, s19_tail);
+ 
++	printf("SWEET AUDIO: S19 before INIT\n");
+ 	s19_steps |= S19_INITCALL;
+ 	s19_init = aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, pa, len,
+ 	    "PAS_INIT_IMAGE(S19)", &r);
