@@ -1,0 +1,21 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 6730255..0542c13 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3669,11 +3669,11 @@ s19_report(void *arg, wait_result_t wr)
+ 	(void)arg;
+ 	(void)wr;
+ 	uint32_t k;
+-	wl_sleep(950u * 1000u);
+-	for (k = 0; k < 3; k++) {
+-		printf("SWEET AUDIO: S19 report steps=%#x len=%u head=%08x tail=%08x init=%d setup=%d\n",
+-		    s19_steps, s19_len, s19_head, s19_tail, s19_init, s19_setup);
+-		wl_sleep(30000u);
++	printf("SWEET AUDIO: S19 heartbeat thread armed (stage %u, delay %u)\n", wl.stage, wl.delay_s);
++	for (k = 0; k < 40; k++) {
++		wl_sleep(60000u);
++		printf("SWEET AUDIO: S19 t=%umin steps=%#x len=%u init=%d setup=%d\n",
++		    (k + 1u) * 1u, s19_steps, s19_len, s19_init, s19_setup);
+ 	}
+ 	thread_terminate(current_thread());
+ 	thread_block(THREAD_CONTINUE_NULL);
