@@ -1,0 +1,29 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 476cdaa..6730255 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3669,7 +3669,7 @@ s19_report(void *arg, wait_result_t wr)
+ 	(void)arg;
+ 	(void)wr;
+ 	uint32_t k;
+-	wl_sleep((wl.delay_s + 700u) * 1000u);
++	wl_sleep(950u * 1000u);
+ 	for (k = 0; k < 3; k++) {
+ 		printf("SWEET AUDIO: S19 report steps=%#x len=%u head=%08x tail=%08x init=%d setup=%d\n",
+ 		    s19_steps, s19_len, s19_head, s19_tail, s19_init, s19_setup);
+@@ -4333,11 +4333,11 @@ wl_thread(void *arg, wait_result_t wr)
+ 		}
+ 	}
+ 	wl_sleep(wl.delay_s * 1000u);
+-	if (!wl_map()) {
+-		printf("SWEET WLAN: MMIO mapping failed\n");
+-		goto out;
+-	}
+ 	if (wl.stage != 19) {
++		if (!wl_map()) {
++			printf("SWEET WLAN: MMIO mapping failed\n");
++			goto out;
++		}
+ 		wl_probe();
+ 	}
+ 	if (wl.stage == 2) {
