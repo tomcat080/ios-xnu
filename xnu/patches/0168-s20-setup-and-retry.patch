@@ -1,0 +1,31 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 5c584b9..adc8735 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3899,14 +3899,24 @@ wl_audio_stage20(void)
+ 	s19_init = aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, pa, len,
+ 	    "PAS_INIT_IMAGE(S20)", &r);
+ 	if (s19_init) {
+-		return;
++		printf("SWEET AUDIO: S20 INIT(1) rejected rc=%d, continuing\n", s19_init);
+ 	}
+ 		s19_steps |= S19_SETUPCALL;
+ 	printf("SWEET AUDIO: S20 INIT rc=%d\n", s19_init);
+ 	s19_setup = aud_pas_call(AUD_CMD_PAS_SETUP, AUD_ARGINFO_SETUP, AUD_PAS_ID, AUD_ADSP_PA,
+ 	    AUD_ADSP_SIZE, "PAS_MEM_SETUP(S20)", &r);
+ 	printf("SWEET AUDIO: S20 MEM_SETUP rc=%d\n", s19_setup);
+-	panic("SWEET S20 init=%d setup=%d steps=%#x len=%u", s19_init, s19_setup, s19_steps, s19_len);
++	{
++		int32_t rc2, rc3;
++		rc2 = aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, AUD_ADSP_PA, len,
++		    "PAS_INIT_IMAGE(S20 carveout)", &r);
++		printf("SWEET AUDIO: S20 INIT(carveout) rc=%d\n", rc2);
++		rc3 = aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, pa, len,
++		    "PAS_INIT_IMAGE(S20 page again)", &r);
++		printf("SWEET AUDIO: S20 INIT(page again) rc=%d\n", rc3);
++		printf("SWEET AUDIO: S20 summary init=%d setup=%d carve=%d again=%d len=%u\n",
++		    s19_init, s19_setup, rc2, rc3, s19_len);
++	}
+ }
+ 
+ /* ---------------------------------------------------------------- stage 13: ADSP segment load */
