@@ -1,0 +1,38 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index 0542c13..4aed40d 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -567,6 +567,7 @@ static struct {
+ 	int sleep_chan;
+ 	bool started;
+ } wl;
++static volatile uint8_t wl_entry_guard;
+ 
+ /* the GENI UART and the HCI state of the stage: held by the RX loop per poll and by every TX */
+ static LCK_GRP_DECLARE(wl_hw_grp, "sweet_bt_uart");
+@@ -592,7 +593,14 @@ static void
+ wl_sleep(unsigned ms)
+ {
+ 	uint64_t deadline;
+-	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++
++	while (ms > 1000u) {
++		clock_interval_to_deadline(1000u, NSEC_PER_MSEC, &deadline);
++		(void)assert_wait_deadline(&wl.sleep_chan, THREAD_UNINT, deadline);
++		thread_block(THREAD_CONTINUE_NULL);
++		ms -= 1000u;
++	}
++	clock_interval_to_deadline(ms ? ms : 1u, NSEC_PER_MSEC, &deadline);
+ 	(void)assert_wait_deadline(&wl.sleep_chan, THREAD_UNINT, deadline);
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+@@ -4396,6 +4404,9 @@ beryllium_wlan_init(void)
+ 		return;                 /* off by default: no log line, no mapping */
+ 	}
+ 	(void)PE_parse_boot_argn("sweetwlandelay", &delay_s, sizeof(delay_s));
++	if (__atomic_test_and_set(&wl_entry_guard, __ATOMIC_SEQ_CST)) {
++		return;                 /* init raced on several CPUs: one thread only */
++	}
+ 	/* Bluetooth firmware (stage 2): sweetbtfw=1 (default) downloads rampatch + NVM when the files exist */
+ 	wl.bt_fw = 1;
+ 	wl.bt_baud = 3000000;           /* 3200000 is the dtsi max-speed and also has an exact S6 rate */
