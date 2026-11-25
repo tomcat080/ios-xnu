@@ -1,0 +1,33 @@
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -4047,8 +4047,10 @@
+ 		printf("SWEET AUDIO: S27 CX vote failed, stop before clocks\n");
+ 		return;
+ 	}
+-	printf("SWEET AUDIO: S27 CX vote accepted, stop before clocks (safe stage)\n");
+-	return;
++	printf("SWEET AUDIO: S27 CX vote accepted\n");
++	if (wl.stage == 27) {
++		return;
++	}
+ 
+ 	g = (volatile uint32_t *)ml_io_map(WL_GCC_PA, WL_GCC_SIZE);
+ 	printf("SWEET AUDIO: S27 gcc=%#llx lpass before q6=%#x sway=%#x\n", (unsigned long long)g,
+@@ -4994,7 +4996,7 @@
+ 		}
+ 	}
+ 	wl_sleep(wl.delay_s * 1000u);
+-	if (wl.stage < 19 || wl.stage > 27) {
++	if (wl.stage < 19 || wl.stage > 28) {
+ 		if (!wl_map()) {
+ 			printf("SWEET WLAN: MMIO mapping failed\n");
+ 			goto out;
+@@ -5053,6 +5055,8 @@
+ 		wl_audio_stage26();
+ 	} else if (wl.stage == 27) {
+ 		wl_audio_stage27();
++	} else if (wl.stage == 28) {
++		wl_audio_stage27();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
