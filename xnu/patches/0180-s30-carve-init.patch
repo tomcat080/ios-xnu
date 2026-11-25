@@ -1,0 +1,103 @@
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -4002,7 +4002,82 @@
+ 	}
+ 	printf("SWEET AUDIO: S21 done\n");
+ }
++
++/* ---------------------------------------------------------------- stage 30: full metadata into carve + INIT */
+ 
++static uint32_t
++s30_word(const uint8_t *p, uint32_t n)
++{
++	uint32_t v = 0;
++	for (uint32_t k = 0; k < 4 && k < n; k++) {
++		v |= (uint32_t)p[k] << (8u * k);
++	}
++	return v;
++}
++
++static void
++wl_audio_stage30(void)
++{
++	static struct wl_fat fat;
++	static uint8_t mdt[8192], hash[8192];
++	struct elf32_ehdr eh;
++	struct elf32_phdr ph;
++	struct mss_scm_regs r;
++	uint32_t cl = 0, size = 0, hcl = 0, hsz = 0, i, len = 0;
++	int32_t rc;
++	volatile uint32_t *cv;
++
++	printf("SWEET AUDIO: stage 30 start\n");
++	rc = sweet_rpmh_arc_set("cx.lvl", 384u);
++	printf("SWEET AUDIO: S30 cx.lvl -> %d\n", rc);
++	if (rc) {
++		return;
++	}
++	if (fat_mount(&fat, "modem")) {
++		printf("SWEET AUDIO: S30 fat mount failed\n");
++		return;
++	}
++	if (fat_open(&fat, "image/adsp.mdt", &cl, &size) || size > sizeof(mdt)
++	    || fat_read_chain(&fat, cl, 0, mdt, size)) {
++		printf("SWEET AUDIO: S30 mdt read failed\n");
++		return;
++	}
++	memcpy(&eh, mdt, sizeof(eh));
++	for (i = 0; i < eh.e_phnum; i++) {
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		if ((ph.p_flags & MDT_TYPE_MASK) == MDT_TYPE_HASH) {
++			if (fat_open(&fat, "image/adsp.b01", &hcl, &hsz) || hsz > sizeof(hash)
++			    || fat_read_chain(&fat, hcl, 0, hash, hsz)) {
++				printf("SWEET AUDIO: S30 hash read failed\n");
++				return;
++			}
++			break;
++		}
++	}
++	len = size + hsz;
++	printf("SWEET AUDIO: S30 mdt=%u hash=%u total=%u\n", size, hsz, len);
++
++	cv = (volatile uint32_t *)ml_io_map(AUD_ADSP_PA, AUD_META_PAGE);
++	printf("SWEET AUDIO: S30 carve=%#llx head=%08x\n", (unsigned long long)cv,
++	    cv ? cv[0] : 0);
++	if (!cv || len > AUD_META_PAGE) {
++		return;
++	}
++	for (i = 0; i < (size + 3u) / 4u; i++) {
++		cv[i] = s30_word(mdt + i * 4u, size - i * 4u);
++	}
++	printf("SWEET AUDIO: S30 mdt written, head=%08x word[%u]=%08x\n", cv[0],
++	    (size - 4u) / 4u, cv[(size - 4u) / 4u]);
++	for (i = 0; i < (hsz + 3u) / 4u; i++) {
++		cv[(size / 4u) + i] = s30_word(hash + i * 4u, hsz - i * 4u);
++	}
++	printf("SWEET AUDIO: S30 hash written, tail=%08x\n", cv[(len - 4u) / 4u]);
++	rc = aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, AUD_ADSP_PA, len,
++	    "S30 PAS_INIT(carve)", &r);
++	printf("SWEET AUDIO: S30 INIT rc=%d\n", rc);
++	printf("SWEET AUDIO: S30 done\n");
++}
++
+ /* ---------------------------------------------------------------- stage 29: single word carve write, no clocks */
+ 
+ static void
+@@ -5019,7 +5094,7 @@
+ 		}
+ 	}
+ 	wl_sleep(wl.delay_s * 1000u);
+-	if (wl.stage < 19 || wl.stage > 29) {
++	if (wl.stage < 19 || wl.stage > 30) {
+ 		if (!wl_map()) {
+ 			printf("SWEET WLAN: MMIO mapping failed\n");
+ 			goto out;
+@@ -5082,6 +5157,8 @@
+ 		wl_audio_stage27();
+ 	} else if (wl.stage == 29) {
+ 		wl_audio_stage29();
++	} else if (wl.stage == 30) {
++		wl_audio_stage30();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
