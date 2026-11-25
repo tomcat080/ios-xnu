@@ -1,0 +1,152 @@
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -56,6 +56,7 @@
+ #define RH_DB_ENTRY     24u
+ #define RH_DB_MAX       0x100000u /* policy bound, not a DT size */
+ #define RH_VRM          4u
++#define RH_ARC          3u
+ #define RH_TIMEOUT_US   100000u
+ 
+ static vm_offset_t rh_rsc, rh_tcs, rh_dict, rh_db;
+@@ -201,7 +202,8 @@
+ 				continue;
+ 			}
+ 			uint32_t addr = rh_read(rh_db, e + 16);
+-			if (slave != RH_VRM || (addr >> 16) != RH_VRM || (addr & 15u) ||
++			if ((slave != RH_VRM && slave != RH_ARC) ||
++			    (addr >> 16) != slave || (addr & 15u) ||
+ 			    !rh_range(aux + rh_db16(e + 22), rh_db16(e + 20))) {
+ 				printf("SWEET RPMH: invalid VRM entry for %s\n", res);
+ 				return EINVAL;
+@@ -345,6 +347,131 @@
+ }
+ 
+ /*
++ * ARC level vote: exactly one command writing the raw level at address+0.
++ * Unlike the PMIC4 LDO path there is no voltage/mode/enable triplet.
++ */
++static int
++rh_send_level(uint32_t address, uint32_t level)
++{
++	int chosen = -1;
++	for (unsigned t = 0; t < RH_ACTIVE_N; ++t) {
++		uint32_t b = t * RH_TCS_STRIDE;
++		uint32_t enabled = rh_read(rh_tcs, b + RH_ENABLE);
++		printf("SWEET RPMH: ARC ACTIVE TCS%u idle=%#x control=%#x enable=%#x wait=%#x\n",
++		    t, rh_read(rh_tcs, b + RH_STATUS), rh_read(rh_tcs, b + RH_CONTROL),
++		    enabled, rh_read(rh_tcs, b + RH_WAIT));
++		if (enabled & ~((1u << rh_ncpt) - 1u)) {
++			return EIO;
++		}
++		for (unsigned c = 0; c < rh_ncpt; ++c) {
++			if ((enabled & (1u << c)) &&
++			    (rh_read(rh_tcs, b + RH_ADDR + c * RH_CMD_STRIDE) & ~15u) == address) {
++				printf("SWEET RPMH: conflicting inherited ARC request in TCS%u\n", t);
++				return EBUSY;
++			}
++		}
++		if (chosen < 0 && rh_free(t)) {
++			chosen = (int)t;
++		}
++	}
++	if (chosen < 0) {
++		printf("SWEET RPMH: no empty idle ACTIVE TCS for ARC\n");
++		return EBUSY;
++	}
++	unsigned t = (unsigned)chosen;
++	uint32_t b = t * RH_TCS_STRIDE, bit = 1u << t;
++	uint32_t irq_en = rh_read(rh_tcs, RH_IRQ_EN);
++	if (irq_en == 0xffffffffu || !rh_free(t)) {
++		return EBUSY;
++	}
++	if (!rh_sync(RH_IRQ_EN, irq_en & ~bit)) {
++		rh_poisoned = true;
++		return EIO;
++	}
++	if (!rh_free(t)) {
++		if (!rh_sync(RH_IRQ_EN, (rh_read(rh_tcs, RH_IRQ_EN) & ~bit) | (irq_en & bit))) {
++			rh_poisoned = true;
++		}
++		return EBUSY;
++	}
++	rh_poisoned = true;
++	printf("SWEET RPMH: TCS%u ARC level=%u irq-enable=%#x\n", t, level, irq_en);
++	if (!rh_sync(b + RH_MSGID, RH_WRITE_ACK) ||
++	    !rh_sync(b + RH_ADDR, address) ||
++	    !rh_sync(b + RH_DATA, level)) {
++		return EIO;
++	}
++	if (!rh_sync(b + RH_WAIT, 1) || !rh_sync(b + RH_ENABLE, 1) ||
++	    !rh_sync(b + RH_CONTROL, 0) || !rh_sync(b + RH_CONTROL, RH_AMC_EN)) {
++		return EIO;
++	}
++	rh_write(rh_tcs, b + RH_CONTROL, RH_AMC_EN | RH_TRIGGER);
++	uint32_t irq = 0, idle = 0, status = 0;
++	bool done = false, progress = false;
++	for (unsigned us = 0; us < RH_TIMEOUT_US; ++us) {
++		irq = rh_read(rh_tcs, RH_IRQ_STATUS);
++		idle = rh_read(rh_tcs, b + RH_STATUS);
++		status = rh_read(rh_tcs, b + RH_CMD_STATUS);
++		bool complete = status != 0xffffffffu &&
++		    (status & (RH_ISSUED | RH_COMPLETE)) == (RH_ISSUED | RH_COMPLETE);
++		progress |= idle == 0 || !complete;
++		if (idle && idle != 0xffffffffu && irq != 0xffffffffu &&
++		    ((irq & bit) || progress) && complete) {
++			done = true;
++			break;
++		}
++		delay(1);
++	}
++	printf("SWEET RPMH: ARC TCS%u done=%d irq=%#x idle=%#x control=%#x cmd-status=%#x\n",
++	    t, done, irq, idle, rh_read(rh_tcs, b + RH_CONTROL), status);
++	if (!done) {
++		return ETIMEDOUT;
++	}
++	if (!rh_sync(b + RH_CONTROL, RH_AMC_EN) || !rh_sync(b + RH_CONTROL, 0) ||
++	    !rh_sync(b + RH_ENABLE, 0) || !rh_sync(b + RH_WAIT, 0)) {
++		return EIO;
++	}
++	rh_write(rh_tcs, RH_IRQ_CLEAR, bit);
++	if ((rh_read(rh_tcs, RH_IRQ_STATUS) & bit) ||
++	    !rh_sync(RH_IRQ_EN, (rh_read(rh_tcs, RH_IRQ_EN) & ~bit) | (irq_en & bit))) {
++		return EIO;
++	}
++	rh_poisoned = false;
++	printf("SWEET RPMH: ARC level vote complete\n");
++	return 0;
++}
++
++int
++sweet_rpmh_arc_set(const char *res, uint32_t level)
++{
++	if (!sweet_board_beryllium() || !res || level < 1 || level > 4096) {
++		return EINVAL;
++	}
++	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
++		return EBUSY;
++	}
++	int error = EIO;
++	uint32_t address = 0;
++	if (rh_poisoned) {
++		printf("SWEET RPMH: previous uncertain transaction; refusing ARC vote\n");
++		goto out;
++	}
++	error = rh_map();
++	if (!error) {
++		error = rh_lookup(res, &address);
++	}
++	if (!error) {
++		error = rh_send_level(address, level);
++	}
++out:
++	if (error) {
++		printf("SWEET RPMH: arc %s level=%u failed errno=%d\n", res, level, error);
++	}
++	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
++	return error;
++}
++
++/*
+  * Poco F1 WCN3990 rails (mainline sdm845-xiaomi-beryllium-common.dtsi):
+  * l5a 0.8 V (cx/mx), l7a 1.8 V (xo), l17a 1.304 V (rfa), l23a 3.3 V (ch1),
+  * l25a 3.3 V (ch0). s4a 1.8 V is a fixed always-on rail: never voted here.
