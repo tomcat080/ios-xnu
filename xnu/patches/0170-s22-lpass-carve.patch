@@ -1,8 +1,6 @@
-diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
-index b9afbb7..9b25930 100644
 --- a/bsd/dev/beryllium_wlan.c
 +++ b/bsd/dev/beryllium_wlan.c
-@@ -4001,6 +4001,105 @@ wl_audio_stage21(void)
+@@ -4001,6 +4001,105 @@
  	printf("SWEET AUDIO: S21 done\n");
  }
  
@@ -29,7 +27,7 @@ index b9afbb7..9b25930 100644
 +	if (!g) {
 +		return;
 +	}
-+	printf("SWEET AUDIO: S22 lpass q6_axi=%#x sway=%#x (read before)\n", g[0x47000 / 4], g[0x47008 / 4]);
++	printf("SWEET AUDIO: S22 lpass q6_axi=%#x sway=%#x (before)\n", g[0x47000 / 4], g[0x47008 / 4]);
 +	g[0x47000 / 4] = 1u;
 +	g[0x47008 / 4] = 1u;
 +	for (tries = 0; tries < 1000; tries++) {
@@ -37,9 +35,9 @@ index b9afbb7..9b25930 100644
 +		if (!(v & (1u << 31))) {
 +			break;
 +		}
-+		_delay(10);
++		__asm__ __volatile__("yield");
 +	}
-+	printf("SWEET AUDIO: S22 lpass q6_axi=%#x sway=%#x (after enable, %u polls)\n",
++	printf("SWEET AUDIO: S22 lpass q6_axi=%#x sway=%#x (after, %u polls)\n",
 +	    g[0x47000 / 4], g[0x47008 / 4], tries);
 +
 +	cv = (volatile uint32_t *)ml_io_map(AUD_ADSP_PA, 0x1000);
@@ -108,7 +106,7 @@ index b9afbb7..9b25930 100644
  /* ---------------------------------------------------------------- stage 13: ADSP segment load */
  
  static uint32_t
-@@ -4548,7 +4647,7 @@ wl_thread(void *arg, wait_result_t wr)
+@@ -4548,7 +4647,7 @@
  		}
  	}
  	wl_sleep(wl.delay_s * 1000u);
@@ -117,7 +115,7 @@ index b9afbb7..9b25930 100644
  		if (!wl_map()) {
  			printf("SWEET WLAN: MMIO mapping failed\n");
  			goto out;
-@@ -4595,6 +4694,8 @@ wl_thread(void *arg, wait_result_t wr)
+@@ -4595,6 +4694,8 @@
  		wl_audio_stage20();
  	} else if (wl.stage == 21) {
  		wl_audio_stage21();
