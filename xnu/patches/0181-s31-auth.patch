@@ -1,0 +1,52 @@
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3254,6 +3254,7 @@
+ #define AUD_META_SIZE       0x4000u         /* 16 KiB: 7516 B mdt + 0x1b28 hash */
+ #define AUD_ARGINFO_INIT    0x82u           /* QCOM_SCM_ARGS(2, VAL, RW) */
+ #define AUD_ARGINFO_SETUP   0x03u           /* QCOM_SCM_ARGS(3) */
++#define AUD_ARGINFO_AUTH    0x01u           /* QCOM_SCM_ARGS(1) */
+ 
+ static uint8_t *aud_meta;                   /* physically contiguous metadata blob */
+ static uint64_t aud_meta_pa;
+@@ -4001,6 +4002,23 @@
+ 		printf("SWEET AUDIO: S21 init id=%u rc=%d\n", id, rc);
+ 	}
+ 	printf("SWEET AUDIO: S21 done\n");
++}
++
++/* ---------------------------------------------------------------- stage 31: AUTH_AND_RESET probe */
++
++static void
++wl_audio_stage31(void)
++{
++	struct mss_scm_regs r;
++	int32_t rc;
++
++	printf("SWEET AUDIO: stage 31 start: auth-and-reset probe\n");
++	rc = sweet_rpmh_arc_set("cx.lvl", 384u);
++	printf("SWEET AUDIO: S31 cx.lvl -> %d\n", rc);
++	rc = aud_pas_call(AUD_CMD_PAS_AUTH, AUD_ARGINFO_AUTH, AUD_PAS_ID,
++	    "S31 PAS_AUTH_AND_RESET", &r);
++	printf("SWEET AUDIO: S31 AUTH rc=%d\n", rc);
++	printf("SWEET AUDIO: S31 done\n");
+ }
+ 
+ /* ---------------------------------------------------------------- stage 30: full metadata into carve + INIT */
+@@ -5094,7 +5112,7 @@
+ 		}
+ 	}
+ 	wl_sleep(wl.delay_s * 1000u);
+-	if (wl.stage < 19 || wl.stage > 30) {
++	if (wl.stage < 19 || wl.stage > 31) {
+ 		if (!wl_map()) {
+ 			printf("SWEET WLAN: MMIO mapping failed\n");
+ 			goto out;
+@@ -5159,6 +5177,8 @@
+ 		wl_audio_stage29();
+ 	} else if (wl.stage == 30) {
+ 		wl_audio_stage30();
++	} else if (wl.stage == 31) {
++		wl_audio_stage31();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
