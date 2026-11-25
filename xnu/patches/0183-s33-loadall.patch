@@ -1,0 +1,161 @@
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -4006,7 +4006,140 @@
+ }
+ 
+ static uint32_t s30_word(const uint8_t *p, uint32_t n);
++
++/* ---------------------------------------------------------------- stage 33: mainline order, load all segments then INIT */
++
++static void
++wl_audio_stage33(void)
++{
++	static struct wl_fat fat;
++	static uint8_t mdt[8192], chunk[4096];
++	struct elf32_ehdr eh;
++	struct elf32_phdr ph;
++	struct mss_scm_regs r;
++	uint32_t cl = 0, size = 0, i, off;
++	uint64_t base = 0, maxend = 0, minstart = ~0ULL, total = 0;
++	int32_t rc;
++	volatile uint8_t *cb;
++	char nm[32];
++
++	printf("SWEET AUDIO: stage 33 start: load all segments then INIT\n");
++	rc = sweet_rpmh_arc_set("cx.lvl", 384u);
++	printf("SWEET AUDIO: S33 cx.lvl -> %d\n", rc);
++	if (rc) {
++		return;
++	}
++	if (fat_mount(&fat, "modem")) {
++		printf("SWEET AUDIO: S33 fat mount failed\n");
++		return;
++	}
++	if (fat_open(&fat, "image/adsp.mdt", &cl, &size) || size > sizeof(mdt)
++	    || fat_read_chain(&fat, cl, 0, mdt, size)) {
++		printf("SWEET AUDIO: S33 mdt read failed\n");
++		return;
++	}
++	memcpy(&eh, mdt, sizeof(eh));
++	printf("SWEET AUDIO: S33 mdt=%u phnum=%u entry=%#llx\n", size, eh.e_phnum,
++	    (unsigned long long)eh.e_entry);
++	for (i = 0; i < eh.e_phnum; i++) {
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		if (ph.p_type != PT_LOAD) {
++			continue;
++		}
++		if ((uint64_t)ph.p_paddr < minstart) {
++			minstart = ph.p_paddr;
++		}
++		if ((uint64_t)ph.p_paddr + ph.p_filesz > maxend) {
++			maxend = (uint64_t)ph.p_paddr + ph.p_filesz;
++		}
++	}
++	printf("SWEET AUDIO: S33 paddr span %#llx..%#llx\n", (unsigned long long)minstart,
++	    (unsigned long long)maxend);
++	if (maxend <= AUD_ADSP_SIZE) {
++		base = 0;
++	} else if (minstart >= AUD_ADSP_PA && maxend <= AUD_ADSP_PA + AUD_ADSP_SIZE) {
++		base = AUD_ADSP_PA;
++	} else {
++		printf("SWEET AUDIO: S33 bad paddr span, abort\n");
++		return;
++	}
++	printf("SWEET AUDIO: S33 reloc base=%#llx (0=relative)\n", (unsigned long long)base);
+ 
++	cb = (volatile uint8_t *)ml_io_map(AUD_ADSP_PA, AUD_ADSP_SIZE);
++	printf("SWEET AUDIO: S33 carve=%#llx head=%02x\n", (unsigned long long)cb,
++	    cb ? cb[0] : 0);
++	if (!cb) {
++		return;
++	}
++
++	for (i = 0; i < eh.e_phnum; i++) {
++		uint64_t dst;
++		uint32_t cl2 = 0, sz = 0;
++
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		if (ph.p_type != PT_LOAD) {
++			continue;
++		}
++		snprintf(nm, sizeof(nm), "image/adsp.b%02u", i);
++		if (fat_open(&fat, nm, &cl2, &sz)) {
++			snprintf(nm, sizeof(nm), "image/adsp.b%02u", i + 1u);
++			if (fat_open(&fat, nm, &cl2, &sz)) {
++				printf("SWEET AUDIO: S33 seg%u open failed (paddr %#x filesz %#x)\n",
++				    i, ph.p_paddr, ph.p_filesz);
++				continue;
++			}
++		}
++		dst = (uint64_t)ph.p_paddr - base;
++		if (dst >= AUD_ADSP_SIZE || dst + ph.p_filesz > AUD_ADSP_SIZE) {
++			printf("SWEET AUDIO: S33 seg%u oob dst=%#llx filesz=%#x\n", i,
++			    (unsigned long long)dst, ph.p_filesz);
++			continue;
++		}
++		if (sz > ph.p_filesz) {
++			sz = ph.p_filesz;
++		}
++		printf("SWEET AUDIO: S33 seg%u paddr=%#x dst=%#llx sz=%u filesz=%#x flags=%#x\n",
++		    i, ph.p_paddr, (unsigned long long)dst, sz, ph.p_filesz, ph.p_flags);
++		for (off = 0; off < sz; off += sizeof(chunk)) {
++			uint32_t n = sz - off;
++			uint32_t k;
++
++			if (n > sizeof(chunk)) {
++				n = sizeof(chunk);
++			}
++			if (fat_read_chain(&fat, cl2, off, chunk, n)) {
++				printf("SWEET AUDIO: S33 seg%u read off=%u failed\n", i, off);
++				break;
++			}
++			for (k = 0; k < n; k++) {
++				cb[dst + off + k] = chunk[k];
++			}
++		}
++		total += sz;
++		if (sz != ph.p_filesz) {
++			printf("SWEET AUDIO: S33 seg%u size mismatch file=%u phdr=%#x\n", i, sz,
++			    ph.p_filesz);
++		}
++	}
++	printf("SWEET AUDIO: S33 loaded total=%llu head=%02x\n", (unsigned long long)total,
++	    cb[0]);
++
++	rc = aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, AUD_ADSP_PA, size,
++	    "S33 PAS_INIT(carve, all segs)", &r);
++	printf("SWEET AUDIO: S33 INIT rc=%d\n", rc);
++	if (rc == 0) {
++		rc = aud_pas_call(AUD_CMD_PAS_SETUP, AUD_ARGINFO_SETUP, AUD_PAS_ID,
++		    AUD_ADSP_PA, AUD_ADSP_SIZE, "S33 PAS_MEM_SETUP", &r);
++		printf("SWEET AUDIO: S33 SETUP rc=%d\n", rc);
++		if (rc == 0) {
++			rc = aud_pas_call(AUD_CMD_PAS_AUTH, AUD_ARGINFO_AUTH, AUD_PAS_ID, 0, 0,
++			    "S33 PAS_AUTH_AND_RESET", &r);
++			printf("SWEET AUDIO: S33 AUTH rc=%d\n", rc);
++		}
++	}
++	printf("SWEET AUDIO: S33 done\n");
++}
++
+ /* ---------------------------------------------------------------- stage 32: supported + mem_setup before init */
+ 
+ static void
+@@ -5161,7 +5294,7 @@
+ 		}
+ 	}
+ 	wl_sleep(wl.delay_s * 1000u);
+-	if (wl.stage < 19 || wl.stage > 32) {
++	if (wl.stage < 19 || wl.stage > 33) {
+ 		if (!wl_map()) {
+ 			printf("SWEET WLAN: MMIO mapping failed\n");
+ 			goto out;
+@@ -5230,6 +5363,8 @@
+ 		wl_audio_stage31();
+ 	} else if (wl.stage == 32) {
+ 		wl_audio_stage32();
++	} else if (wl.stage == 33) {
++		wl_audio_stage33();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
