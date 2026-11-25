@@ -1,0 +1,45 @@
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -58,6 +58,7 @@
+ extern int sweet_rpmh_vreg_set(const char *res, unsigned mv, bool enable);
+ extern int sweet_rpmh_lookup(const char *res, uint32_t *address);
+ extern int sweet_rpmh_arc_set(const char *res, uint32_t level);
++extern int sweet_rpmh_dump(unsigned max);
+ void beryllium_wlan_init(void);
+ /* bsd/dev/beryllium_bt_hci.c: the kernel control the iOS userland talks to */
+ struct bt_hci_ops {
+@@ -4002,6 +4003,16 @@
+ 	printf("SWEET AUDIO: S21 done\n");
+ }
+ 
++/* ---------------------------------------------------------------- stage 26: cmd-db key dump (read-only) */
++
++static void
++wl_audio_stage26(void)
++{
++	printf("SWEET AUDIO: stage 26 start: cmd-db keys\n");
++	printf("SWEET AUDIO: S26 dump rc=%d\n", sweet_rpmh_dump(400u));
++	printf("SWEET AUDIO: S26 done\n");
++}
++
+ /* ---------------------------------------------------------------- stage 25: CX vote + LPASS clocks + carve metadata + INIT */
+ 
+ static void
+@@ -4897,7 +4908,7 @@
+ 		}
+ 	}
+ 	wl_sleep(wl.delay_s * 1000u);
+-	if (wl.stage < 19 || wl.stage > 25) {
++	if (wl.stage < 19 || wl.stage > 26) {
+ 		if (!wl_map()) {
+ 			printf("SWEET WLAN: MMIO mapping failed\n");
+ 			goto out;
+@@ -4952,6 +4963,8 @@
+ 		wl_audio_stage24();
+ 	} else if (wl.stage == 25) {
+ 		wl_audio_stage25();
++	} else if (wl.stage == 26) {
++		wl_audio_stage26();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
