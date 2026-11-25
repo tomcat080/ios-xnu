@@ -1,0 +1,113 @@
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -4001,6 +4001,92 @@
+ 		printf("SWEET AUDIO: S21 init id=%u rc=%d\n", id, rc);
+ 	}
+ 	printf("SWEET AUDIO: S21 done\n");
++}
++
++/* ---------------------------------------------------------------- stage 27: cx.lvl TURBO + LPASS + carve metadata + INIT */
++
++static void
++wl_audio_stage27(void)
++{
++	static struct wl_fat fat;
++	static uint8_t mdt[8192];
++	struct elf32_ehdr eh;
++	struct elf32_phdr ph;
++	struct mss_scm_regs r;
++	uint32_t cl = 0, size = 0, hcl = 0, hsz = 0, i, len = 0;
++	int32_t rc;
++	volatile uint32_t *g;
++	volatile uint8_t *cv;
++
++	printf("SWEET AUDIO: stage 27 start\n");
++	if (fat_mount(&fat, "modem")) {
++		printf("SWEET AUDIO: S27 fat mount failed\n");
++		return;
++	}
++	if (fat_open(&fat, "image/adsp.mdt", &cl, &size) || size > sizeof(mdt)
++	    || fat_read_chain(&fat, cl, 0, mdt, size)) {
++		printf("SWEET AUDIO: S27 mdt read failed\n");
++		return;
++	}
++	memcpy(&eh, mdt, sizeof(eh));
++	for (i = 0; i < eh.e_phnum; i++) {
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		if ((ph.p_flags & MDT_TYPE_MASK) == MDT_TYPE_HASH) {
++			if (fat_open(&fat, "image/adsp.b01", &hcl, &hsz) || hsz != ph.p_filesz) {
++				printf("SWEET AUDIO: S27 hash read failed\n");
++				return;
++			}
++			break;
++		}
++	}
++	printf("SWEET AUDIO: S27 mdt=%u hash=%u\n", size, hsz);
++
++	rc = sweet_rpmh_arc_set("cx.lvl", 384u);
++	printf("SWEET AUDIO: S27 cx.lvl TURBO -> %d\n", rc);
++	if (rc) {
++		printf("SWEET AUDIO: S27 CX vote failed, stop before clocks\n");
++		return;
++	}
++	printf("SWEET AUDIO: S27 CX vote accepted, stop before clocks (safe stage)\n");
++	return;
++
++	g = (volatile uint32_t *)ml_io_map(WL_GCC_PA, WL_GCC_SIZE);
++	printf("SWEET AUDIO: S27 gcc=%#llx lpass before q6=%#x sway=%#x\n", (unsigned long long)g,
++	    g ? g[0x47000 / 4] : 0, g ? g[0x47008 / 4] : 0);
++	if (!g) {
++		return;
++	}
++	g[0x47000 / 4] = 1u;
++	printf("SWEET AUDIO: S27 q6_axi write returned, now=%#x\n", g[0x47000 / 4]);
++	g[0x47008 / 4] = 1u;
++	printf("SWEET AUDIO: S27 sway write returned, now=%#x\n", g[0x47008 / 4]);
++
++	cv = (volatile uint8_t *)ml_io_map(AUD_ADSP_PA, AUD_META_PAGE);
++	printf("SWEET AUDIO: S27 carve=%#llx head=%08x\n", (unsigned long long)cv,
++	    cv ? *(volatile uint32_t *)cv : 0);
++	if (!cv) {
++		return;
++	}
++	memcpy((void *)cv, mdt, size);
++	len = size;
++	for (i = 0; i < eh.e_phnum; i++) {
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		if ((ph.p_flags & MDT_TYPE_MASK) == MDT_TYPE_HASH) {
++			if (fat_read_chain(&fat, hcl, 0, mdt, hsz)) {
++				printf("SWEET AUDIO: S27 hash read failed\n");
++				return;
++			}
++			memcpy((void *)(cv + len), mdt, hsz);
++			len += hsz;
++			break;
++		}
++	}
++	printf("SWEET AUDIO: S27 carve written len=%u head=%08x tail=%08x\n", len,
++	    *(volatile uint32_t *)cv, *(volatile uint32_t *)(cv + len - 4));
++	rc = aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, AUD_ADSP_PA, len,
++	    "S27 PAS_INIT(cx-carve)", &r);
++	printf("SWEET AUDIO: S27 INIT rc=%d\n", rc);
++	printf("SWEET AUDIO: S27 done\n");
+ }
+ 
+ /* ---------------------------------------------------------------- stage 26: cmd-db key dump (read-only) */
+@@ -4908,7 +4994,7 @@
+ 		}
+ 	}
+ 	wl_sleep(wl.delay_s * 1000u);
+-	if (wl.stage < 19 || wl.stage > 26) {
++	if (wl.stage < 19 || wl.stage > 27) {
+ 		if (!wl_map()) {
+ 			printf("SWEET WLAN: MMIO mapping failed\n");
+ 			goto out;
+@@ -4965,6 +5051,8 @@
+ 		wl_audio_stage25();
+ 	} else if (wl.stage == 26) {
+ 		wl_audio_stage26();
++	} else if (wl.stage == 27) {
++		wl_audio_stage27();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
