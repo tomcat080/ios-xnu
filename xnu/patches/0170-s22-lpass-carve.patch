@@ -1,0 +1,128 @@
+diff --git a/bsd/dev/beryllium_wlan.c b/bsd/dev/beryllium_wlan.c
+index b9afbb7..9b25930 100644
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -4001,6 +4001,105 @@ wl_audio_stage21(void)
+ 	printf("SWEET AUDIO: S21 done\n");
+ }
+ 
++/* ---------------------------------------------------------------- stage 22: LPASS clocks + carve probe + INIT retry */
++
++static void
++wl_audio_stage22(void)
++{
++	static struct wl_fat fat;
++	static uint8_t mdt[8192];
++	struct elf32_ehdr eh;
++	struct elf32_phdr ph;
++	struct mss_scm_regs r;
++	vm_offset_t meta_cached;
++	uint64_t pa;
++	uint32_t cl = 0, size = 0, hcl = 0, hsz = 0, i, len = 0, v, tries;
++	int32_t rc;
++	ppnum_t pn;
++	volatile uint32_t *g, *cv;
++
++	printf("SWEET AUDIO: stage 22 start\n");
++	g = (volatile uint32_t *)ml_io_map(WL_GCC_PA, WL_GCC_SIZE);
++	printf("SWEET AUDIO: S22 gcc map=%#llx\n", (unsigned long long)g);
++	if (!g) {
++		return;
++	}
++	printf("SWEET AUDIO: S22 lpass q6_axi=%#x sway=%#x (read before)\n", g[0x47000 / 4], g[0x47008 / 4]);
++	g[0x47000 / 4] = 1u;
++	g[0x47008 / 4] = 1u;
++	for (tries = 0; tries < 1000; tries++) {
++		v = g[0x47000 / 4];
++		if (!(v & (1u << 31))) {
++			break;
++		}
++		_delay(10);
++	}
++	printf("SWEET AUDIO: S22 lpass q6_axi=%#x sway=%#x (after enable, %u polls)\n",
++	    g[0x47000 / 4], g[0x47008 / 4], tries);
++
++	cv = (volatile uint32_t *)ml_io_map(AUD_ADSP_PA, 0x1000);
++	printf("SWEET AUDIO: S22 carve map=%#llx head=%08x %08x\n", (unsigned long long)cv,
++	    cv ? cv[0] : 0, cv ? cv[1] : 0);
++	if (cv) {
++		printf("SWEET AUDIO: S22 writing 0xdeadbeef to carve[0]...\n");
++		cv[0] = 0xdeadbeefu;
++		__asm__ __volatile__("dmb sy");
++		printf("SWEET AUDIO: S22 carve readback=%08x (survived)\n", cv[0]);
++	}
++
++	if (fat_mount(&fat, "modem")) {
++		printf("SWEET AUDIO: S22 fat mount failed\n");
++		return;
++	}
++	if (fat_open(&fat, "image/adsp.mdt", &cl, &size) || size > sizeof(mdt)
++	    || fat_read_chain(&fat, cl, 0, mdt, size)) {
++		printf("SWEET AUDIO: S22 mdt read failed\n");
++		return;
++	}
++	memcpy(&eh, mdt, sizeof(eh));
++	for (i = 0; i < eh.e_phnum; i++) {
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		if ((ph.p_flags & MDT_TYPE_MASK) == MDT_TYPE_HASH) {
++			if (fat_open(&fat, "image/adsp.b01", &hcl, &hsz) || hsz != ph.p_filesz) {
++				printf("SWEET AUDIO: S22 hash read failed\n");
++				return;
++			}
++			break;
++		}
++	}
++	len = size;
++	if (kmem_alloc_contig(kernel_map, &meta_cached, AUD_META_PAGE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET AUDIO: S22 alloc failed\n");
++		return;
++	}
++	pn = pmap_find_phys(kernel_pmap, (addr64_t)meta_cached);
++	if (!pn) {
++		printf("SWEET AUDIO: S22 pa lookup failed\n");
++		return;
++	}
++	pa = (uint64_t)pn * 4096u;
++	memcpy((void *)meta_cached, mdt, size);
++	for (i = 0; i < eh.e_phnum; i++) {
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		if ((ph.p_flags & MDT_TYPE_MASK) == MDT_TYPE_HASH) {
++			if (fat_read_chain(&fat, hcl, 0, (uint8_t *)meta_cached + size, hsz)) {
++				printf("SWEET AUDIO: S22 hash copy failed\n");
++				return;
++			}
++			len += hsz;
++			break;
++		}
++	}
++	sweet_dma_sync_va((const void *)meta_cached, AUD_META_PAGE);
++	printf("SWEET AUDIO: S22 meta len=%u pa=%#llx head=%08x\n", len,
++	    (unsigned long long)pa, ((volatile uint32_t *)meta_cached)[0]);
++	rc = aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, pa, len,
++	    "S22 PAS_INIT(powered)", &r);
++	printf("SWEET AUDIO: S22 INIT rc=%d\n", rc);
++	printf("SWEET AUDIO: S22 done\n");
++}
++
+ /* ---------------------------------------------------------------- stage 13: ADSP segment load */
+ 
+ static uint32_t
+@@ -4548,7 +4647,7 @@ wl_thread(void *arg, wait_result_t wr)
+ 		}
+ 	}
+ 	wl_sleep(wl.delay_s * 1000u);
+-	if (wl.stage < 19 || wl.stage > 21) {
++	if (wl.stage < 19 || wl.stage > 22) {
+ 		if (!wl_map()) {
+ 			printf("SWEET WLAN: MMIO mapping failed\n");
+ 			goto out;
+@@ -4595,6 +4694,8 @@ wl_thread(void *arg, wait_result_t wr)
+ 		wl_audio_stage20();
+ 	} else if (wl.stage == 21) {
+ 		wl_audio_stage21();
++	} else if (wl.stage == 22) {
++		wl_audio_stage22();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
