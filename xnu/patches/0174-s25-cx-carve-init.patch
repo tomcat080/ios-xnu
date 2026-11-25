@@ -1,0 +1,122 @@
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -57,6 +57,7 @@
+ extern int sweet_ufs_part_size(const char *name, uint8_t *lun, uint64_t *bytes);
+ extern int sweet_rpmh_vreg_set(const char *res, unsigned mv, bool enable);
+ extern int sweet_rpmh_lookup(const char *res, uint32_t *address);
++extern int sweet_rpmh_arc_set(const char *res, uint32_t level);
+ void beryllium_wlan_init(void);
+ /* bsd/dev/beryllium_bt_hci.c: the kernel control the iOS userland talks to */
+ struct bt_hci_ops {
+@@ -3999,6 +4000,93 @@
+ 		printf("SWEET AUDIO: S21 init id=%u rc=%d\n", id, rc);
+ 	}
+ 	printf("SWEET AUDIO: S21 done\n");
++}
++
++/* ---------------------------------------------------------------- stage 25: CX vote + LPASS clocks + carve metadata + INIT */
++
++static void
++wl_audio_stage25(void)
++{
++	static struct wl_fat fat;
++	static uint8_t mdt[8192];
++	struct elf32_ehdr eh;
++	struct elf32_phdr ph;
++	struct mss_scm_regs r;
++	uint32_t cl = 0, size = 0, hcl = 0, hsz = 0, i, len = 0;
++	int32_t rc;
++	volatile uint32_t *g;
++	volatile uint8_t *cv;
++	static const char *cx_names[] = { "vdd_cx", "s9", "cx" };
++	unsigned n;
++
++	printf("SWEET AUDIO: stage 25 start\n");
++	if (fat_mount(&fat, "modem")) {
++		printf("SWEET AUDIO: S25 fat mount failed\n");
++		return;
++	}
++	if (fat_open(&fat, "image/adsp.mdt", &cl, &size) || size > sizeof(mdt)
++	    || fat_read_chain(&fat, cl, 0, mdt, size)) {
++		printf("SWEET AUDIO: S25 mdt read failed\n");
++		return;
++	}
++	memcpy(&eh, mdt, sizeof(eh));
++	for (i = 0; i < eh.e_phnum; i++) {
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		if ((ph.p_flags & MDT_TYPE_MASK) == MDT_TYPE_HASH) {
++			if (fat_open(&fat, "image/adsp.b01", &hcl, &hsz) || hsz != ph.p_filesz) {
++				printf("SWEET AUDIO: S25 hash read failed\n");
++				return;
++			}
++			break;
++		}
++	}
++	printf("SWEET AUDIO: S25 mdt=%u hash=%u\n", size, hsz);
++
++	for (n = 0; n < sizeof(cx_names) / sizeof(cx_names[0]); n++) {
++		rc = sweet_rpmh_arc_set(cx_names[n], 384u);
++		printf("SWEET AUDIO: S25 CX vote %s -> %d\n", cx_names[n], rc);
++		if (rc == 0) {
++			break;
++		}
++	}
++
++	g = (volatile uint32_t *)ml_io_map(WL_GCC_PA, WL_GCC_SIZE);
++	printf("SWEET AUDIO: S25 gcc=%#llx lpass before q6=%#x sway=%#x\n", (unsigned long long)g,
++	    g ? g[0x47000 / 4] : 0, g ? g[0x47008 / 4] : 0);
++	if (!g) {
++		return;
++	}
++	g[0x47000 / 4] = 1u;
++	printf("SWEET AUDIO: S25 q6_axi write returned, now=%#x\n", g[0x47000 / 4]);
++	g[0x47008 / 4] = 1u;
++	printf("SWEET AUDIO: S25 sway write returned, now=%#x\n", g[0x47008 / 4]);
++
++	cv = (volatile uint8_t *)ml_io_map(AUD_ADSP_PA, AUD_META_PAGE);
++	printf("SWEET AUDIO: S25 carve=%#llx head=%08x\n", (unsigned long long)cv,
++	    cv ? *(volatile uint32_t *)cv : 0);
++	if (!cv) {
++		return;
++	}
++	memcpy((void *)cv, mdt, size);
++	len = size;
++	for (i = 0; i < eh.e_phnum; i++) {
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		if ((ph.p_flags & MDT_TYPE_MASK) == MDT_TYPE_HASH) {
++			if (fat_read_chain(&fat, hcl, 0, mdt, hsz)) {
++				printf("SWEET AUDIO: S25 hash read failed\n");
++				return;
++			}
++			memcpy((void *)(cv + len), mdt, hsz);
++			len += hsz;
++			break;
++		}
++	}
++	printf("SWEET AUDIO: S25 carve written len=%u head=%08x tail=%08x\n", len,
++	    *(volatile uint32_t *)cv, *(volatile uint32_t *)(cv + len - 4));
++	rc = aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, AUD_ADSP_PA, len,
++	    "S25 PAS_INIT(carve+cx)", &r);
++	printf("SWEET AUDIO: S25 INIT rc=%d\n", rc);
++	printf("SWEET AUDIO: S25 done\n");
+ }
+ 
+ /* ---------------------------------------------------------------- stage 24: cache flush + INIT only */
+@@ -4809,7 +4897,7 @@
+ 		}
+ 	}
+ 	wl_sleep(wl.delay_s * 1000u);
+-	if (wl.stage < 19 || wl.stage > 24) {
++	if (wl.stage < 19 || wl.stage > 25) {
+ 		if (!wl_map()) {
+ 			printf("SWEET WLAN: MMIO mapping failed\n");
+ 			goto out;
+@@ -4862,6 +4950,8 @@
+ 		wl_audio_stage23();
+ 	} else if (wl.stage == 24) {
+ 		wl_audio_stage24();
++	} else if (wl.stage == 25) {
++		wl_audio_stage25();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
