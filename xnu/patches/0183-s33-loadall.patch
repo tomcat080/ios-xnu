@@ -1,11 +1,13 @@
 --- a/bsd/dev/beryllium_wlan.c
 +++ b/bsd/dev/beryllium_wlan.c
-@@ -4006,7 +4006,140 @@
+@@ -4006,7 +4006,142 @@
  }
  
  static uint32_t s30_word(const uint8_t *p, uint32_t n);
 +
 +/* ---------------------------------------------------------------- stage 33: mainline order, load all segments then INIT */
++
++#define AUD_PT_LOAD 1u
 +
 +static void
 +wl_audio_stage33(void)
@@ -20,7 +22,7 @@
 +	int32_t rc;
 +	volatile uint8_t *cb;
 +	char nm[32];
-+
+ 
 +	printf("SWEET AUDIO: stage 33 start: load all segments then INIT\n");
 +	rc = sweet_rpmh_arc_set("cx.lvl", 384u);
 +	printf("SWEET AUDIO: S33 cx.lvl -> %d\n", rc);
@@ -41,7 +43,7 @@
 +	    (unsigned long long)eh.e_entry);
 +	for (i = 0; i < eh.e_phnum; i++) {
 +		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
-+		if (ph.p_type != PT_LOAD) {
++		if (ph.p_type != AUD_PT_LOAD) {
 +			continue;
 +		}
 +		if ((uint64_t)ph.p_paddr < minstart) {
@@ -62,7 +64,7 @@
 +		return;
 +	}
 +	printf("SWEET AUDIO: S33 reloc base=%#llx (0=relative)\n", (unsigned long long)base);
- 
++
 +	cb = (volatile uint8_t *)ml_io_map(AUD_ADSP_PA, AUD_ADSP_SIZE);
 +	printf("SWEET AUDIO: S33 carve=%#llx head=%02x\n", (unsigned long long)cb,
 +	    cb ? cb[0] : 0);
@@ -75,7 +77,7 @@
 +		uint32_t cl2 = 0, sz = 0;
 +
 +		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
-+		if (ph.p_type != PT_LOAD) {
++		if (ph.p_type != AUD_PT_LOAD) {
 +			continue;
 +		}
 +		snprintf(nm, sizeof(nm), "image/adsp.b%02u", i);
@@ -141,7 +143,7 @@
  /* ---------------------------------------------------------------- stage 32: supported + mem_setup before init */
  
  static void
-@@ -5161,7 +5294,7 @@
+@@ -5161,7 +5296,7 @@
  		}
  	}
  	wl_sleep(wl.delay_s * 1000u);
@@ -150,7 +152,7 @@
  		if (!wl_map()) {
  			printf("SWEET WLAN: MMIO mapping failed\n");
  			goto out;
-@@ -5230,6 +5363,8 @@
+@@ -5230,6 +5365,8 @@
  		wl_audio_stage31();
  	} else if (wl.stage == 32) {
  		wl_audio_stage32();
