@@ -1,0 +1,80 @@
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -4021,7 +4021,8 @@
+ 	struct elf32_phdr ph;
+ 	struct mss_scm_regs r;
+ 	uint32_t cl = 0, size = 0, i, off;
+-	uint64_t base = 0, maxend = 0, minstart = ~0ULL, total = 0;
++	uint64_t base = 0, maxend = 0, minstart = ~0ULL, total = 0, cover = 0;
++	uint32_t mlen = 0;
+ 	int32_t rc;
+ 	volatile uint8_t *cb;
+ 	char nm[32];
+@@ -4066,10 +4067,16 @@
+ 		printf("SWEET AUDIO: S33 bad paddr span, abort\n");
+ 		return;
+ 	}
+-	printf("SWEET AUDIO: S33 reloc base=%#llx (0=relative)\n", (unsigned long long)base);
+-
+-	cb = (volatile uint8_t *)ml_io_map(AUD_ADSP_PA, 0x1000);
+-	printf("SWEET AUDIO: S33 carve probe=%#llx head=%02x\n", (unsigned long long)cb,
++	if (minstart < AUD_ADSP_PA || maxend > AUD_ADSP_PA + AUD_ADSP_SIZE) {
++		printf("SWEET AUDIO: S33 span outside carve, abort\n");
++		return;
++	}
++	base = minstart;
++	cover = maxend - minstart;
++	mlen = (uint32_t)((cover + 0xfffu) & ~0xfffu);
++	printf("SWEET AUDIO: S33 cover=%#llx map_len=%#x\n", (unsigned long long)cover, mlen);
++	cb = (volatile uint8_t *)ml_io_map((vm_offset_t)minstart, mlen);
++	printf("SWEET AUDIO: S33 carve map=%#llx head=%02x\n", (unsigned long long)cb,
+ 	    cb ? cb[0] : 0);
+ 	if (!cb) {
+ 		return;
+@@ -4105,29 +4112,17 @@
+ 		    i, ph.p_paddr, (unsigned long long)dst, sz, ph.p_filesz, ph.p_flags);
+ 		for (off = 0; off < sz; off += AUD_WIN) {
+ 			uint32_t n = sz - off;
+-			uint32_t k, mlen;
+-			volatile uint8_t *wm;
++			uint32_t k;
+ 
+ 			if (n > AUD_WIN) {
+ 				n = AUD_WIN;
+ 			}
+-			if (dst + off + n > AUD_ADSP_SIZE) {
+-				printf("SWEET AUDIO: S33 seg%u tail oob off=%u\n", i, off);
+-				break;
+-			}
+-			mlen = (n + 0xfffu) & ~0xfffu;
+-			wm = (volatile uint8_t *)ml_io_map(AUD_ADSP_PA + dst + off, mlen);
+-			if (!wm) {
+-				printf("SWEET AUDIO: S33 seg%u map off=%u len=%u failed\n",
+-				    i, off, mlen);
+-				break;
+-			}
+ 			if (fat_read_chain(&fat, cl2, off, chunk, n)) {
+ 				printf("SWEET AUDIO: S33 seg%u read off=%u failed\n", i, off);
+ 				break;
+ 			}
+ 			for (k = 0; k < n; k++) {
+-				wm[k] = chunk[k];
++				cb[dst + off + k] = chunk[k];
+ 			}
+ 		}
+ 		total += sz;
+@@ -4138,6 +4133,14 @@
+ 	}
+ 	printf("SWEET AUDIO: S33 loaded total=%llu head=%02x\n", (unsigned long long)total,
+ 	    cb[0]);
++	for (i = 0; i < (size + 3u) / 4u; i++) {
++		cb[i * 4u] = mdt[i * 4u];
++		cb[i * 4u + 1u] = (i * 4u + 1u < size) ? mdt[i * 4u + 1u] : 0;
++		cb[i * 4u + 2u] = (i * 4u + 2u < size) ? mdt[i * 4u + 2u] : 0;
++		cb[i * 4u + 3u] = (i * 4u + 3u < size) ? mdt[i * 4u + 3u] : 0;
++	}
++	printf("SWEET AUDIO: S33 mdt restored head=%02x %02x %02x %02x\n", cb[0], cb[1],
++	    cb[2], cb[3]);
+ 
+ 	rc = aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, AUD_ADSP_PA, size,
+ 	    "S33 PAS_INIT(carve, all segs)", &r);
