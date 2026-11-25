@@ -25,7 +25,7 @@
 +	printf("SWEET AUDIO: stage 31 start: auth-and-reset probe\n");
 +	rc = sweet_rpmh_arc_set("cx.lvl", 384u);
 +	printf("SWEET AUDIO: S31 cx.lvl -> %d\n", rc);
-+	rc = aud_pas_call(AUD_CMD_PAS_AUTH, AUD_ARGINFO_AUTH, AUD_PAS_ID,
++	rc = aud_pas_call(AUD_CMD_PAS_AUTH, AUD_ARGINFO_AUTH, AUD_PAS_ID, 0, 0,
 +	    "S31 PAS_AUTH_AND_RESET", &r);
 +	printf("SWEET AUDIO: S31 AUTH rc=%d\n", rc);
 +	printf("SWEET AUDIO: S31 done\n");
