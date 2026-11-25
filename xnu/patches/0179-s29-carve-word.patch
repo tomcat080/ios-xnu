@@ -1,0 +1,50 @@
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -4003,6 +4003,29 @@
+ 	printf("SWEET AUDIO: S21 done\n");
+ }
+ 
++/* ---------------------------------------------------------------- stage 29: single word carve write, no clocks */
++
++static void
++wl_audio_stage29(void)
++{
++	int32_t rc;
++	volatile uint32_t *cv;
++
++	printf("SWEET AUDIO: stage 29 start: one-word carve write\n");
++	rc = sweet_rpmh_arc_set("cx.lvl", 384u);
++	printf("SWEET AUDIO: S29 cx.lvl -> %d\n", rc);
++	cv = (volatile uint32_t *)ml_io_map(AUD_ADSP_PA, 0x1000);
++	printf("SWEET AUDIO: S29 carve=%#llx head=%08x\n", (unsigned long long)cv,
++	    cv ? cv[0] : 0);
++	if (!cv) {
++		return;
++	}
++	printf("SWEET AUDIO: S29 writing one word now\n");
++	cv[0] = 0xdeadbeefu;
++	printf("SWEET AUDIO: S29 write returned, readback=%08x\n", cv[0]);
++	printf("SWEET AUDIO: S29 done\n");
++}
++
+ /* ---------------------------------------------------------------- stage 27: cx.lvl TURBO + LPASS + carve metadata + INIT */
+ 
+ static void
+@@ -4996,7 +5019,7 @@
+ 		}
+ 	}
+ 	wl_sleep(wl.delay_s * 1000u);
+-	if (wl.stage < 19 || wl.stage > 28) {
++	if (wl.stage < 19 || wl.stage > 29) {
+ 		if (!wl_map()) {
+ 			printf("SWEET WLAN: MMIO mapping failed\n");
+ 			goto out;
+@@ -5057,6 +5080,8 @@
+ 		wl_audio_stage27();
+ 	} else if (wl.stage == 28) {
+ 		wl_audio_stage27();
++	} else if (wl.stage == 29) {
++		wl_audio_stage29();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
