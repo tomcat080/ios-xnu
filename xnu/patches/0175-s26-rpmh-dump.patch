@@ -1,0 +1,52 @@
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -346,6 +346,49 @@
+ 	return 0;
+ }
+ 
++/* Read-only cmd-db dump: discovers the firmware's real resource names. */
++int
++sweet_rpmh_dump(unsigned max)
++{
++	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
++		return EBUSY;
++	}
++	int error = rh_map();
++	if (error) {
++		goto out;
++	}
++	unsigned shown = 0;
++	for (unsigned i = 0; i < 8 && shown < max; ++i) {
++		uint32_t h = 8u + 16u * i;
++		unsigned slave = rh_db16(h);
++		if (!slave) {
++			break;
++		}
++		uint32_t entries = RH_DB_HEADER + rh_db16(h + 2);
++		unsigned count = rh_db16(h + 6);
++		if ((entries & 3u) || !rh_range(entries, count * RH_DB_ENTRY)) {
++			continue;
++		}
++		printf("SWEET RPMH: dump slave=%u count=%u aux=%#x\n", slave, count, rh_db16(h + 4));
++		for (unsigned j = 0; j < count && shown < max; ++j, ++shown) {
++			uint32_t e = entries + RH_DB_ENTRY * j;
++			uint32_t k0 = rh_read(rh_db, e), k1 = rh_read(rh_db, e + 4);
++			char name[9];
++			for (unsigned k = 0; k < 8; ++k) {
++				uint32_t v = (k < 4) ? (k0 >> (8u * k)) : (k1 >> (8u * (k - 4)));
++				name[k] = (char)(v & 0xffu);
++			}
++			name[8] = 0;
++			printf("SWEET RPMH: key[%u] '%s' slave=%u addr=%#x\n", shown, name, slave,
++			    rh_read(rh_db, e + 16));
++		}
++	}
++	error = 0;
++out:
++	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
++	return error;
++}
++
+ /*
+  * ARC level vote: exactly one command writing the raw level at address+0.
+  * Unlike the PMIC4 LDO path there is no voltage/mode/enable triplet.
