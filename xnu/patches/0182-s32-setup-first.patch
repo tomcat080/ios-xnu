@@ -1,0 +1,84 @@
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -3132,6 +3132,7 @@
+ #define AUD_CMD_PAS_INIT   0x01u
+ #define AUD_CMD_PAS_SETUP  0x02u
+ #define AUD_CMD_PAS_AUTH   0x05u
++#define AUD_CMD_PAS_SUPPORTED 0x07u
+ 
+ static void
+ wl_pas_query(uint32_t cmd, const char *name)
+@@ -4003,7 +4004,55 @@
+ 	}
+ 	printf("SWEET AUDIO: S21 done\n");
+ }
++
++static uint32_t s30_word(const uint8_t *p, uint32_t n);
++
++/* ---------------------------------------------------------------- stage 32: supported + mem_setup before init */
++
++static void
++wl_audio_stage32(void)
++{
++	static struct wl_fat fat;
++	static uint8_t mdt[8192];
++	struct mss_scm_regs r;
++	uint32_t cl = 0, size = 0, i;
++	int32_t rc;
++	volatile uint32_t *cv;
+ 
++	printf("SWEET AUDIO: stage 32 start\n");
++	rc = sweet_rpmh_arc_set("cx.lvl", 384u);
++	printf("SWEET AUDIO: S32 cx.lvl -> %d\n", rc);
++	rc = aud_pas_call(AUD_CMD_PAS_SUPPORTED, AUD_ARGINFO_AUTH, AUD_PAS_ID, 0, 0,
++	    "S32 PAS_IS_SUPPORTED", &r);
++	printf("SWEET AUDIO: S32 supported rc=%d\n", rc);
++	if (fat_mount(&fat, "modem")) {
++		printf("SWEET AUDIO: S32 fat mount failed\n");
++		return;
++	}
++	if (fat_open(&fat, "image/adsp.mdt", &cl, &size) || size > sizeof(mdt)
++	    || fat_read_chain(&fat, cl, 0, mdt, size)) {
++		printf("SWEET AUDIO: S32 mdt read failed\n");
++		return;
++	}
++	cv = (volatile uint32_t *)ml_io_map(AUD_ADSP_PA, AUD_META_PAGE);
++	printf("SWEET AUDIO: S32 carve=%#llx head=%08x\n", (unsigned long long)cv,
++	    cv ? cv[0] : 0);
++	if (!cv || size > AUD_META_PAGE) {
++		return;
++	}
++	for (i = 0; i < (size + 3u) / 4u; i++) {
++		cv[i] = s30_word(mdt + i * 4u, size - i * 4u);
++	}
++	printf("SWEET AUDIO: S32 mdt only written, head=%08x size=%u\n", cv[0], size);
++	rc = aud_pas_call(AUD_CMD_PAS_SETUP, AUD_ARGINFO_SETUP, AUD_PAS_ID,
++	    AUD_ADSP_PA, AUD_ADSP_SIZE, "S32 PAS_MEM_SETUP", &r);
++	printf("SWEET AUDIO: S32 SETUP rc=%d\n", rc);
++	rc = aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, AUD_ADSP_PA, size,
++	    "S32 PAS_INIT(carve)", &r);
++	printf("SWEET AUDIO: S32 INIT rc=%d\n", rc);
++	printf("SWEET AUDIO: S32 done\n");
++}
++
+ /* ---------------------------------------------------------------- stage 31: AUTH_AND_RESET probe */
+ 
+ static void
+@@ -5112,7 +5161,7 @@
+ 		}
+ 	}
+ 	wl_sleep(wl.delay_s * 1000u);
+-	if (wl.stage < 19 || wl.stage > 31) {
++	if (wl.stage < 19 || wl.stage > 32) {
+ 		if (!wl_map()) {
+ 			printf("SWEET WLAN: MMIO mapping failed\n");
+ 			goto out;
+@@ -5179,6 +5228,8 @@
+ 		wl_audio_stage30();
+ 	} else if (wl.stage == 31) {
+ 		wl_audio_stage31();
++	} else if (wl.stage == 32) {
++		wl_audio_stage32();
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
