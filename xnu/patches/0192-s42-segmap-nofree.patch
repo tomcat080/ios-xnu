@@ -1,0 +1,321 @@
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -4020,151 +4020,243 @@
+ 	static struct wl_fat fat;
+ 	static uint8_t mdt[8192];
+ 	static uint8_t aud_img[0x700000] __attribute__((aligned(4096)));
++	static uint8_t aud_hi[0x10000] __attribute__((aligned(4096)));
+ 	struct elf32_ehdr eh;
+ 	struct elf32_phdr ph;
+ 	struct mss_scm_regs r;
+ 	uint32_t cl = 0, size = 0, i, off;
+-	uint64_t base = 0, maxend = 0, minstart = ~0ULL, total = 0, cover = 0;
+-	uint32_t mlen = 0;
++	uint64_t total = 0, low_end = 0, hi_base = ~0ULL, hi_end = 0;
++	uint64_t hi_off = 0, hi_len = 0;
++	uint32_t nmap = 0, mapped = 0;
+ 	int32_t rc;
+-	volatile uint8_t *cb;
++	volatile uint8_t *mdva = 0, *hiva = 0;
+ 	char nm[32];
+-
+-	printf("SWEET AUDIO: stage 41 start: vendor order, data-only span\n");
++	struct {
++		uint64_t dst;
++		uint32_t sz;
++		volatile uint8_t *va;
++	} seg[16];
++
++	printf("SWEET AUDIO: stage 42 start: per-seg map, never free, high tail window\n");
+ 	rc = sweet_rpmh_arc_set("cx.lvl", 384u);
+-	printf("SWEET AUDIO: S41 cx.lvl -> %d\n", rc);
++	printf("SWEET AUDIO: S42 cx.lvl -> %d\n", rc);
+ 	if (rc) {
+ 		return;
+ 	}
+ 	if (fat_mount(&fat, "modem")) {
+-		printf("SWEET AUDIO: S41 fat mount failed\n");
++		printf("SWEET AUDIO: S42 fat mount failed\n");
+ 		return;
+ 	}
+ 	if (fat_open(&fat, "image/adsp.mdt", &cl, &size) || size > sizeof(mdt)
+ 	    || fat_read_chain(&fat, cl, 0, mdt, size)) {
+-		printf("SWEET AUDIO: S41 mdt read failed\n");
++		printf("SWEET AUDIO: S42 mdt read failed\n");
+ 		return;
+ 	}
+ 	memcpy(&eh, mdt, sizeof(eh));
+-	printf("SWEET AUDIO: S41 mdt=%u phnum=%u entry=%#llx\n", size, eh.e_phnum,
++	printf("SWEET AUDIO: S42 mdt=%u phnum=%u entry=%#llx\n", size, eh.e_phnum,
+ 	    (unsigned long long)eh.e_entry);
++
++	/* First pass: classify data segments into low static / high tail. */
+ 	for (i = 0; i < eh.e_phnum; i++) {
++		uint64_t dst;
++		bool hash;
++
+ 		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
+-		bool hash = (ph.p_flags & MDT_TYPE_MASK) == MDT_TYPE_HASH;
++		hash = (ph.p_flags & MDT_TYPE_MASK) == MDT_TYPE_HASH;
+ 		if (ph.p_type != AUD_PT_LOAD || hash || ph.p_filesz == 0) {
++			printf("SWEET AUDIO: S42 ph%u skipped type=%u filesz=%#x flags=%#x\n",
++			    i, ph.p_type, ph.p_filesz, ph.p_flags);
+ 			continue;
+ 		}
+-		if ((uint64_t)ph.p_paddr < minstart) {
+-			minstart = ph.p_paddr;
++		if ((uint64_t)ph.p_paddr < AUD_ADSP_PA ||
++		    (uint64_t)ph.p_paddr + ph.p_filesz > AUD_ADSP_PA + AUD_ADSP_SIZE) {
++			printf("SWEET AUDIO: S42 ph%u outside carve paddr=%#x filesz=%#x\n",
++			    i, ph.p_paddr, ph.p_filesz);
++			continue;
+ 		}
+-		if ((uint64_t)ph.p_paddr + ph.p_filesz > maxend) {
+-			maxend = (uint64_t)ph.p_paddr + ph.p_filesz;
++		dst = (uint64_t)ph.p_paddr - AUD_ADSP_PA;
++		printf("SWEET AUDIO: S42 ph%u paddr=%#x filesz=%#x memsz=%#x flags=%#x dst=%#llx\n",
++		    i, ph.p_paddr, ph.p_filesz, ph.p_memsz, ph.p_flags,
++		    (unsigned long long)dst);
++		if (dst < sizeof(aud_img)) {
++			if (dst + ph.p_filesz > sizeof(aud_img)) {
++				printf("SWEET AUDIO: S42 ph%u crosses static end\n", i);
++				return;
++			}
++			if (dst + ph.p_filesz > low_end) {
++				low_end = dst + ph.p_filesz;
++			}
++		} else {
++			if (hi_base == ~0ULL || (uint64_t)ph.p_paddr < hi_base) {
++				hi_base = ph.p_paddr;
++			}
++			if ((uint64_t)ph.p_paddr + ph.p_filesz > hi_end) {
++				hi_end = (uint64_t)ph.p_paddr + ph.p_filesz;
++			}
+ 		}
+ 	}
+-	printf("SWEET AUDIO: S41 data span %#llx..%#llx cover=%#llx\n",
+-	    (unsigned long long)minstart, (unsigned long long)maxend,
+-	    (unsigned long long)(maxend - minstart));
+-	if (minstart < AUD_ADSP_PA || maxend > AUD_ADSP_PA + AUD_ADSP_SIZE) {
+-		printf("SWEET AUDIO: S41 span outside carve, abort\n");
+-		return;
++	if (hi_base != ~0ULL) {
++		hi_len = hi_end - hi_base;
++		if (hi_len > sizeof(aud_hi)) {
++			printf("SWEET AUDIO: S42 high tail %#llx too big\n",
++			    (unsigned long long)hi_len);
++			return;
++		}
++		hi_off = hi_base - AUD_ADSP_PA;
++		printf("SWEET AUDIO: S42 high tail %#llx len=%#llx off=%#llx\n",
++		    (unsigned long long)hi_base, (unsigned long long)hi_len,
++		    (unsigned long long)hi_off);
+ 	}
+-	base = AUD_ADSP_PA;
+-	cover = maxend - minstart;
+-	if (cover > sizeof(aud_img)) {
+-		printf("SWEET AUDIO: S41 cover %#llx exceeds static image\n",
+-		    (unsigned long long)cover);
+-		return;
+-	}
+-	printf("SWEET AUDIO: S41 span %#llx..%#llx cover=%#llx\n",
+-	    (unsigned long long)minstart, (unsigned long long)maxend,
+-	    (unsigned long long)cover);
++	printf("SWEET AUDIO: S42 low data end=%#llx\n", (unsigned long long)low_end);
+ 
+-	/* Preload every payload before touching kernel_map. */
++	/* Second pass: preload every byte into static memory. */
+ 	for (i = 0; i < eh.e_phnum; i++) {
+ 		uint64_t dst;
+ 		uint32_t cl2 = 0, sz = 0;
++		bool hash;
+ 
+ 		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
+-		bool hash = (ph.p_flags & MDT_TYPE_MASK) == MDT_TYPE_HASH;
++		hash = (ph.p_flags & MDT_TYPE_MASK) == MDT_TYPE_HASH;
+ 		if (ph.p_type != AUD_PT_LOAD || hash || ph.p_filesz == 0) {
+ 			continue;
+ 		}
++		dst = (uint64_t)ph.p_paddr - AUD_ADSP_PA;
++		if (dst >= sizeof(aud_img) && (uint64_t)ph.p_paddr < hi_base) {
++			continue;
++		}
+ 		snprintf(nm, sizeof(nm), "image/adsp.b%02u", i);
+ 		if (fat_open(&fat, nm, &cl2, &sz)) {
+ 			snprintf(nm, sizeof(nm), "image/adsp.b%02u", i + 1u);
+ 			if (fat_open(&fat, nm, &cl2, &sz)) {
+-				printf("SWEET AUDIO: S41 seg%u open failed (paddr %#x filesz %#x)\n",
+-				    i, ph.p_paddr, ph.p_filesz);
++				printf("SWEET AUDIO: S42 ph%u open failed\n", i);
+ 				continue;
+ 			}
+ 		}
+-		dst = (uint64_t)ph.p_paddr - base;
+-		if (dst >= cover || dst + ph.p_filesz > cover) {
+-			printf("SWEET AUDIO: S41 seg%u oob dst=%#llx filesz=%#x\n", i,
+-			    (unsigned long long)dst, ph.p_filesz);
+-			continue;
+-		}
+ 		if (sz > ph.p_filesz) {
+ 			sz = ph.p_filesz;
+ 		}
+-		printf("SWEET AUDIO: S41 seg%u paddr=%#x dst=%#llx sz=%u filesz=%#x\n",
+-		    i, ph.p_paddr, (unsigned long long)dst, sz, ph.p_filesz);
+-		if (fat_read_chain(&fat, cl2, 0, aud_img + dst, sz)) {
+-			printf("SWEET AUDIO: S41 seg%u preload read failed\n", i);
+-			continue;
+-		}
+-		total += sz;
+-		if (sz != ph.p_filesz) {
+-			printf("SWEET AUDIO: S41 seg%u size mismatch file=%u phdr=%#x\n", i, sz,
+-			    ph.p_filesz);
++		if (dst < sizeof(aud_img)) {
++			if (fat_read_chain(&fat, cl2, 0, aud_img + dst, sz)) {
++				printf("SWEET AUDIO: S42 ph%u low preload failed\n", i);
++				continue;
++			}
++		} else {
++			uint64_t o = (uint64_t)ph.p_paddr - hi_base;
++			if (o + sz > sizeof(aud_hi)) {
++				printf("SWEET AUDIO: S42 ph%u high overflow o=%#llx sz=%u\n",
++				    i, (unsigned long long)o, sz);
++				return;
++			}
++			if (fat_read_chain(&fat, cl2, 0, aud_hi + o, sz)) {
++				printf("SWEET AUDIO: S42 ph%u high preload failed\n", i);
++				continue;
++			}
+ 		}
++		total += sz;
++		if (sz != ph.p_filesz) {
++			printf("SWEET AUDIO: S42 ph%u size mismatch file=%u phdr=%#x\n",
++			    i, sz, ph.p_filesz);
++		}
+ 	}
+ 
+-	mlen = (uint32_t)((cover + 0xfffu) & ~0xfffu);
+-	cb = (volatile uint8_t *)ml_io_map((vm_offset_t)base, mlen);
+-	printf("SWEET AUDIO: S41 carve map=%#llx len=%#x\n", (unsigned long long)cb, mlen);
+-	if (!cb) {
+-		printf("SWEET AUDIO: S41 carve map failed\n");
++	/* Map the mdt page and keep it; never free. */
++	mdva = (volatile uint8_t *)ml_io_map((vm_offset_t)AUD_ADSP_PA, 0x2000);
++	printf("SWEET AUDIO: S42 mdt map=%#llx\n", (unsigned long long)mdva);
++	if (!mdva) {
++		printf("SWEET AUDIO: S42 mdt map failed\n");
+ 		return;
+ 	}
++	mapped += 0x2000;
+ 
+-	/* Vendor init_image copies only the .mdt bytes, no hash segment. */
++	/* Third pass: one mapping per low segment, no free. */
++	for (i = 0; i < eh.e_phnum; i++) {
++		uint64_t dst;
++		uint32_t mlen;
++		bool hash;
++
++		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
++		hash = (ph.p_flags & MDT_TYPE_MASK) == MDT_TYPE_HASH;
++		if (ph.p_type != AUD_PT_LOAD || hash || ph.p_filesz == 0) {
++			continue;
++		}
++		dst = (uint64_t)ph.p_paddr - AUD_ADSP_PA;
++		if (dst >= sizeof(aud_img)) {
++			continue;
++		}
++		mlen = (ph.p_filesz + 0xfffu) & ~0xfffu;
++		if (nmap >= 16) {
++			printf("SWEET AUDIO: S42 too many segments\n");
++			return;
++		}
++		seg[nmap].dst = dst;
++		seg[nmap].sz = ph.p_filesz;
++		seg[nmap].va = (volatile uint8_t *)ml_io_map((vm_offset_t)ph.p_paddr, mlen);
++		printf("SWEET AUDIO: S42 map ph%u va=%#llx len=%#x\n", i,
++		    (unsigned long long)seg[nmap].va, mlen);
++		if (!seg[nmap].va) {
++			printf("SWEET AUDIO: S42 ph%u map failed after %u bytes\n",
++			    i, mapped);
++			return;
++		}
++		mapped += mlen;
++		nmap++;
++	}
++	if (hi_base != ~0ULL) {
++		uint32_t mlen = (uint32_t)((hi_len + 0xfffu) & ~0xfffu);
++		hiva = (volatile uint8_t *)ml_io_map((vm_offset_t)hi_base, mlen);
++		printf("SWEET AUDIO: S42 high map=%#llx len=%#x\n",
++		    (unsigned long long)hiva, mlen);
++		if (!hiva) {
++			printf("SWEET AUDIO: S42 high map failed after %u bytes\n", mapped);
++			return;
++		}
++		mapped += mlen;
++	}
++	printf("SWEET AUDIO: S42 total mapped=%u bytes, preload=%llu\n", mapped,
++	    (unsigned long long)total);
++
++	/* Vendor init_image: only the .mdt bytes at the carve base. */
+ 	for (i = 0; i < size; i++) {
+-		cb[i] = mdt[i];
++		mdva[i] = mdt[i];
+ 	}
+ 	__asm__ volatile ("dmb sy" ::: "memory");
+-	printf("SWEET AUDIO: S41 mdt-only written size=%u head=%02x %02x %02x %02x\n",
+-	    size, cb[0], cb[1], cb[2], cb[3]);
++	printf("SWEET AUDIO: S42 mdt-only written size=%u head=%02x %02x %02x %02x\n",
++	    size, mdva[0], mdva[1], mdva[2], mdva[3]);
+ 
+ 	rc = aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, AUD_ADSP_PA, size,
+-	    "S41 PAS_INIT(mdt only, carve)", &r);
+-	printf("SWEET AUDIO: S41 INIT rc=%d\n", rc);
++	    "S42 PAS_INIT(mdt only, carve)", &r);
++	printf("SWEET AUDIO: S42 INIT rc=%d\n", rc);
+ 	if (rc != 0) {
+-		printf("SWEET AUDIO: S41 INIT rejected, stop before SETUP/segments\n");
++		printf("SWEET AUDIO: S42 INIT rejected, stop before SETUP\n");
+ 		return;
+ 	}
+-
+ 	rc = aud_pas_call(AUD_CMD_PAS_SETUP, AUD_ARGINFO_SETUP, AUD_PAS_ID,
+-	    AUD_ADSP_PA, AUD_ADSP_SIZE, "S41 PAS_MEM_SETUP", &r);
+-	printf("SWEET AUDIO: S41 SETUP rc=%d\n", rc);
++	    AUD_ADSP_PA, AUD_ADSP_SIZE, "S42 PAS_MEM_SETUP", &r);
++	printf("SWEET AUDIO: S42 SETUP rc=%d\n", rc);
+ 	if (rc != 0) {
+-		printf("SWEET AUDIO: S41 SETUP rejected, stop before segments\n");
++		printf("SWEET AUDIO: S42 SETUP rejected, stop before segments\n");
+ 		return;
+ 	}
+ 
+-	/* Now load every segment; seg0 overwrites the mdt header at the base. */
+-	for (off = 0; off < cover; off += AUD_WIN) {
+-		uint32_t n = (uint32_t)MIN((uint64_t)AUD_WIN, cover - off);
+-		memcpy((void *)(cb + off), aud_img + off, n);
++	for (i = 0; i < nmap; i++) {
++		uint32_t k;
++		for (k = 0; k < seg[i].sz; k++) {
++			seg[i].va[k] = aud_img[seg[i].dst + k];
++		}
++	}
++	if (hiva) {
++		for (i = 0; i < hi_len; i++) {
++			hiva[i] = aud_hi[i];
++		}
+ 	}
+ 	__asm__ volatile ("dmb sy" ::: "memory");
+-	printf("SWEET AUDIO: S41 segments loaded total=%llu head=%02x %02x %02x %02x\n",
+-	    (unsigned long long)total, cb[0], cb[1], cb[2], cb[3]);
++	printf("SWEET AUDIO: S42 segments written %u segs total=%llu head=%02x %02x %02x %02x\n",
++	    nmap, (unsigned long long)total, mdva[0], mdva[1], mdva[2], mdva[3]);
+ 
+ 	rc = aud_pas_call(AUD_CMD_PAS_AUTH, AUD_ARGINFO_AUTH, AUD_PAS_ID, 0, 0,
+-	    "S41 PAS_AUTH_AND_RESET", &r);
+-	printf("SWEET AUDIO: S41 AUTH rc=%d\n", rc);
+-	printf("SWEET AUDIO: S41 done\n");
++	    "S42 PAS_AUTH_AND_RESET", &r);
++	printf("SWEET AUDIO: S42 AUTH rc=%d\n", rc);
++	printf("SWEET AUDIO: S42 done\n");
+ }
+ 
+ /* ---------------------------------------------------------------- stage 32: supported + mem_setup before init */
