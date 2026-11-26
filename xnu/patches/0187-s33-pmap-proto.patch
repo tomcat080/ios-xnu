@@ -1,0 +1,29 @@
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -52,6 +52,8 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern void pmap_enter(pmap_t pmap, vm_map_address_t va, uint64_t pa, vm_prot_t prot,
++    unsigned int wimg, boolean_t wired);
+ extern kern_return_t thread_terminate(thread_t);
+ extern int sweet_ufs_read_part(const char *name, uint64_t off, void *dst, uint64_t len);
+ extern int sweet_ufs_part_size(const char *name, uint8_t *lun, uint64_t *bytes);
+@@ -4134,7 +4136,7 @@
+ 					    (vm_map_address_t)(cb + k + 0x1000));
+ 					pmap_enter(kernel_pmap,
+ 					    (vm_map_address_t)(cb + k),
+-					    (phys_address_t)(nb + k),
++					    (uint64_t)(nb + k),
+ 					    VM_PROT_READ | VM_PROT_WRITE,
+ 					    VM_WIMG_IO, TRUE);
+ 				}
+@@ -4159,7 +4161,7 @@
+ 			pmap_remove(kernel_pmap, (vm_map_address_t)(cb + k),
+ 			    (vm_map_address_t)(cb + k + 0x1000));
+ 			pmap_enter(kernel_pmap, (vm_map_address_t)(cb + k),
+-			    (phys_address_t)(win_base + k), VM_PROT_READ | VM_PROT_WRITE,
++			    (uint64_t)(win_base + k), VM_PROT_READ | VM_PROT_WRITE,
+ 			    VM_WIMG_IO, TRUE);
+ 		}
+ 	}
