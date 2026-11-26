@@ -1,0 +1,101 @@
+--- a/bsd/dev/beryllium_wlan.c
++++ b/bsd/dev/beryllium_wlan.c
+@@ -4076,19 +4076,12 @@
+ 	}
+ 	base = AUD_ADSP_PA;
+ 	cover = maxend - minstart;
+-	mlen = 0x200000;
+-	printf("SWEET AUDIO: S33 cover=%#llx win=%#x\n", (unsigned long long)cover, mlen);
+-	win_base = AUD_ADSP_PA;
+-	cb = (volatile uint8_t *)ml_io_map((vm_offset_t)win_base, mlen);
+-	printf("SWEET AUDIO: S33 carve map=%#llx head=%02x\n", (unsigned long long)cb,
+-	    cb ? cb[0] : 0);
+-	if (!cb) {
+-		return;
+-	}
++	printf("SWEET AUDIO: S33 cover=%#llx per-seg map/free\n", (unsigned long long)cover);
+ 
+ 	for (i = 0; i < eh.e_phnum; i++) {
+ 		uint64_t dst;
+-		uint32_t cl2 = 0, sz = 0;
++		uint32_t cl2 = 0, sz = 0, mlen;
++		volatile uint8_t *va;
+ 
+ 		memcpy(&ph, mdt + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
+ 		if (ph.p_type != AUD_PT_LOAD) {
+@@ -4114,10 +4107,15 @@
+ 		}
+ 		printf("SWEET AUDIO: S33 seg%u paddr=%#x dst=%#llx sz=%u filesz=%#x flags=%#x\n",
+ 		    i, ph.p_paddr, (unsigned long long)dst, sz, ph.p_filesz, ph.p_flags);
++		mlen = (sz + 0xfffu) & ~0xfffu;
++		va = (volatile uint8_t *)ml_io_map((vm_offset_t)(AUD_ADSP_PA + dst), mlen);
++		if (!va) {
++			printf("SWEET AUDIO: S33 seg%u map failed len=%#x\n", i, mlen);
++			continue;
++		}
+ 		for (off = 0; off < sz; off += AUD_WIN) {
+ 			uint32_t n = sz - off;
+ 			uint32_t k;
+-			uint64_t abs;
+ 
+ 			if (n > AUD_WIN) {
+ 				n = AUD_WIN;
+@@ -4126,50 +4124,27 @@
+ 				printf("SWEET AUDIO: S33 seg%u read off=%u failed\n", i, off);
+ 				break;
+ 			}
+-			abs = AUD_ADSP_PA + dst + off;
+-			if (abs < win_base || abs + n > win_base + mlen) {
+-				uint64_t nb = AUD_ADSP_PA +
+-				    ((abs - AUD_ADSP_PA) & ~(uint64_t)(mlen - 1));
+-				for (k = 0; k < mlen; k += 0x1000) {
+-					pmap_remove(kernel_pmap,
+-					    (vm_map_address_t)(cb + k),
+-					    (vm_map_address_t)(cb + k + 0x1000));
+-					pmap_enter(kernel_pmap,
+-					    (vm_map_address_t)(cb + k),
+-					    (uint64_t)(nb + k),
+-					    VM_PROT_READ | VM_PROT_WRITE,
+-					    VM_WIMG_IO, TRUE);
+-				}
+-				win_base = nb;
+-			}
+ 			for (k = 0; k < n; k++) {
+-				cb[(abs - win_base) + k] = chunk[k];
++				va[off + k] = chunk[k];
+ 			}
+ 		}
++		kmem_free(kernel_map, (vm_offset_t)va, mlen);
+ 		total += sz;
+ 		if (sz != ph.p_filesz) {
+ 			printf("SWEET AUDIO: S33 seg%u size mismatch file=%u phdr=%#x\n", i, sz,
+ 			    ph.p_filesz);
+ 		}
+ 	}
+-	printf("SWEET AUDIO: S33 loaded total=%llu head=%02x\n", (unsigned long long)total,
+-	    cb[0]);
+-	if (win_base != AUD_ADSP_PA) {
+-		uint32_t k;
+-		win_base = AUD_ADSP_PA;
+-		for (k = 0; k < mlen; k += 0x1000) {
+-			pmap_remove(kernel_pmap, (vm_map_address_t)(cb + k),
+-			    (vm_map_address_t)(cb + k + 0x1000));
+-			pmap_enter(kernel_pmap, (vm_map_address_t)(cb + k),
+-			    (uint64_t)(win_base + k), VM_PROT_READ | VM_PROT_WRITE,
+-			    VM_WIMG_IO, TRUE);
+-		}
++	cb = (volatile uint8_t *)ml_io_map(AUD_ADSP_PA, 0x2000);
++	if (!cb) {
++		printf("SWEET AUDIO: S33 mdt remap failed\n");
++		return;
+ 	}
+ 	for (i = 0; i < size; i++) {
+ 		cb[i] = mdt[i];
+ 	}
+-	printf("SWEET AUDIO: S33 mdt restored head=%02x %02x %02x %02x\n", cb[0], cb[1],
+-	    cb[2], cb[3]);
++	printf("SWEET AUDIO: S33 loaded total=%llu mdt head=%02x %02x %02x %02x\n",
++	    (unsigned long long)total, cb[0], cb[1], cb[2], cb[3]);
+ 
+ 	rc = aud_pas_call(AUD_CMD_PAS_INIT, AUD_ARGINFO_INIT, AUD_PAS_ID, AUD_ADSP_PA, size,
+ 	    "S33 PAS_INIT(carve, all segs)", &r);
